@@ -1,0 +1,32 @@
+{
+  "name": "@koyeb/sandbox-sdk",
+  "version": "1.0.0",
+  "description": "Koyeb Sandbox JavaScript SDK",
+  "repository": "git://github.com/koyeb/koyeb-sandbox-sdk-js.git",
+  "author": "Koyeb <support@koyeb.com>",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.23.0",
+  "files": [
+    "lib"
+  ],
+  "type": "module",
+  "exports": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc"
+  },
+  "peerDependencies": {
+    "@koyeb/api-client-js": "^1.0.0"
+  },
+  "devDependencies": {
+    "@koyeb/api-client-js": "^1.1.5",
+    "@types/node": "^24.10.1",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3"
+  },
+  "prettier": {
+    "printWidth": 120,
+    "singleQuote": true
+  }
+}

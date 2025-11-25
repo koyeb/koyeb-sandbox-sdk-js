@@ -1,0 +1,223 @@
+import { KoyebApi, koyeb } from './api.js';
+import { DEFAULT_INSTANCE_WAIT_TIMEOUT, DEFAULT_POLL_INTERVAL } from './constants.js';
+import { MissingApiTokenError, NoSandboxSecretError, SandboxTimeoutError } from './errors.js';
+import { SandboxExecutor } from './sandbox-executor.js';
+import { assert, getEnv, isDefined, isUndefined, randomString, waitFor } from './utils.js';
+
+export type CreateSandboxOptions = Partial<{
+  image: string;
+  name: string;
+  wait_ready: boolean;
+  instance_type: string;
+  exposed_port_protocol: 'http' | 'http2';
+  env: Record<string, string>;
+  region: string;
+  api_token: string;
+  timeout: number;
+  idle_timeout: number;
+  enable_tcp_proxy: boolean;
+  privileged: false;
+  _experimental_enable_light_sleep: false;
+}>;
+
+export class Sandbox {
+  private api: KoyebApi;
+  private domain?: koyeb.Domain;
+
+  constructor(
+    private app_id: string,
+    private service_id: string,
+    private name: string,
+    private sandbox_secret: string,
+    private api_token?: string,
+  ) {
+    this.api = new KoyebApi(this.api_token);
+  }
+
+  get id(): string {
+    return this.service_id;
+  }
+
+  private static defaultCreateSandboxOptions = {
+    image: 'koyeb/sandbox',
+    name: 'quick-sandbox',
+    wait_ready: true,
+    instance_type: 'micro',
+    exposed_port_protocol: 'http',
+    timeout: DEFAULT_INSTANCE_WAIT_TIMEOUT,
+    idle_timeout: 300,
+  } satisfies CreateSandboxOptions;
+
+  static async create(options: CreateSandboxOptions): Promise<Sandbox> {
+    const opts = { ...this.defaultCreateSandboxOptions, ...options };
+    const token = opts.api_token ?? getEnv('KOYEB_API_TOKEN');
+
+    if (!token) {
+      throw new MissingApiTokenError();
+    }
+
+    const definition: koyeb.DeploymentDefinition = {
+      name: opts.name,
+      type: 'SANDBOX',
+      docker: { image: opts.image, privileged: opts.privileged },
+      instance_types: [{ type: opts.instance_type }],
+      regions: [opts.region ?? 'na'],
+      ports: [
+        { port: 3030, protocol: 'http' },
+        { port: 3031, protocol: opts.exposed_port_protocol },
+      ],
+      routes: [
+        { port: 3030, path: '/koyeb-sandbox/' },
+        { port: 3031, path: '/' },
+      ],
+    };
+
+    const sandbox_secret = randomString(32);
+
+    definition.env ??= [];
+    definition.env.push({ key: 'SANDBOX_SECRET', value: sandbox_secret });
+
+    for (const [key, value] of Object.entries(opts.env ?? {})) {
+      definition.env.push({ key, value });
+    }
+
+    const { idle_timeout } = opts;
+    let sleep_idle_delay: koyeb.DeploymentScalingTargetSleepIdleDelay | undefined = undefined;
+
+    if (idle_timeout > 0) {
+      if (opts._experimental_enable_light_sleep) {
+        sleep_idle_delay = { light_sleep_value: idle_timeout, deep_sleep_value: 3900 };
+      } else {
+        sleep_idle_delay = { deep_sleep_value: idle_timeout };
+      }
+    }
+
+    definition.scalings = [
+      {
+        min: sleep_idle_delay ? 0 : 1,
+        max: 1,
+        targets: [{ sleep_idle_delay }],
+      },
+    ];
+
+    if (opts.enable_tcp_proxy) {
+      definition.proxy_ports = [{ port: 3031, protocol: 'tcp' }];
+    }
+
+    const api = new KoyebApi(token);
+    const app = await api.createApp(`sandbox-app-${opts.name}-${Date.now()}`);
+    const service = await api.createService({ app_id: app.id, definition });
+
+    const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, sandbox_secret, token);
+
+    if (opts.wait_ready && !(await sandbox.wait_ready(opts.timeout))) {
+      throw new SandboxTimeoutError(sandbox.name, opts.timeout);
+    }
+
+    return sandbox;
+  }
+
+  static async get_from_id(serviceId: string, apiToken?: string) {
+    const token = apiToken ?? getEnv('KOYEB_API_TOKEN');
+
+    if (!token) {
+      throw new MissingApiTokenError();
+    }
+
+    const api = new KoyebApi(token);
+    const service = await api.getService(serviceId);
+    const deployment = await api.getDeployment(service.latest_deployment_id!);
+
+    const secret = deployment.definition?.env?.find(({ key }) => key === 'SANDBOX_SECRET');
+
+    assert(secret?.value, new NoSandboxSecretError());
+
+    return new Sandbox(service.app_id!, service.id!, service.name!, secret.value, token);
+  }
+
+  async wait_ready(
+    timeout = DEFAULT_INSTANCE_WAIT_TIMEOUT,
+    pollInterval = DEFAULT_POLL_INTERVAL,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return waitFor(() => this.is_healthy(), timeout, pollInterval, signal);
+  }
+
+  async wait_tcp_proxy_ready(
+    timeout = DEFAULT_INSTANCE_WAIT_TIMEOUT,
+    pollInterval = DEFAULT_POLL_INTERVAL,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return waitFor(async () => isDefined(await this.get_tcp_proxy_info()), timeout, pollInterval, signal);
+  }
+
+  async is_healthy(): Promise<boolean> {
+    const url = await this.get_sandbox_url();
+    const response = await fetch(`${url}/health`);
+
+    return response.ok;
+  }
+
+  async get_tcp_proxy_info(): Promise<[host: string, public_port: number] | undefined> {
+    const service = await this.api.getService(this.service_id);
+
+    if (isUndefined(service.active_deployment_id)) {
+      return;
+    }
+
+    const deployment = await this.api.getDeployment(service.active_deployment_id);
+    const proxy_port = deployment.metadata?.proxy_ports?.find(({ port }) => port === 3031);
+
+    if (!proxy_port) {
+      return;
+    }
+
+    return [proxy_port.host!, proxy_port.public_port!];
+  }
+
+  async get_domain() {
+    if (this.domain) {
+      return this.domain;
+    }
+
+    const app = await this.api.getApp(this.app_id);
+    const domain = app.domains?.[0];
+
+    assert(domain);
+    this.domain = domain;
+
+    return this.domain;
+  }
+
+  async get_sandbox_url(): Promise<string> {
+    const domain = await this.get_domain();
+    const name = domain.name;
+
+    assert(name);
+
+    return `https://${name}/koyeb-sandbox`;
+  }
+
+  async delete(): Promise<void> {
+    const services = await this.api.listServices({ app_id: this.app_id });
+
+    if (services.length === 1) {
+      await this.api.deleteApp(this.app_id);
+    } else {
+      await this.api.deleteService(this.service_id);
+    }
+  }
+
+  async exec() {
+    return new SandboxExecutor(await this.get_sandbox_url(), this.sandbox_secret);
+  }
+}
+
+// filesystem
+// exec
+// expose_port
+// unexpose_port
+// launch_process
+// kill_process
+// list_processes
+// kill_all_processes

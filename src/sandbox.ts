@@ -1,7 +1,7 @@
 import { KoyebApi, koyeb } from './api.js';
 import { DEFAULT_INSTANCE_WAIT_TIMEOUT, DEFAULT_POLL_INTERVAL } from './constants.js';
-import { MissingApiTokenError, NoSandboxSecretError, SandboxTimeoutError } from './errors.js';
-import { SandboxExecutor } from './sandbox-executor.js';
+import { MissingApiTokenError, NoSandboxSecretError, SandboxRequestError, SandboxTimeoutError } from './errors.js';
+import { SandboxFilesystem } from './sandbox-filesystem.js';
 import { assert, getEnv, isDefined, isUndefined, randomString, waitFor } from './utils.js';
 
 export type CreateSandboxOptions = Partial<{
@@ -21,15 +21,15 @@ export type CreateSandboxOptions = Partial<{
 }>;
 
 export class Sandbox {
-  private api: KoyebApi;
+  private readonly api: KoyebApi;
   private domain?: koyeb.Domain;
 
   constructor(
-    private app_id: string,
-    private service_id: string,
-    private name: string,
-    private sandbox_secret: string,
-    private api_token?: string,
+    private readonly app_id: string,
+    private readonly service_id: string,
+    private readonly name: string,
+    private readonly sandbox_secret: string,
+    private readonly api_token?: string,
   ) {
     this.api = new KoyebApi(this.api_token);
   }
@@ -48,7 +48,7 @@ export class Sandbox {
     idle_timeout: 300,
   } satisfies CreateSandboxOptions;
 
-  static async create(options: CreateSandboxOptions): Promise<Sandbox> {
+  static async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
     const opts = { ...this.defaultCreateSandboxOptions, ...options };
     const token = opts.api_token ?? getEnv('KOYEB_API_TOKEN');
 
@@ -208,13 +208,42 @@ export class Sandbox {
     }
   }
 
-  async exec() {
-    return new SandboxExecutor(await this.get_sandbox_url(), this.sandbox_secret);
+  async request(path: string, init: RequestInit, requestBody?: unknown) {
+    init.headers = new Headers(init.headers);
+
+    init.headers.set('Authorization', `Bearer ${this.sandbox_secret}`);
+
+    if (isDefined(requestBody)) {
+      init.headers.set('Content-Type', 'application/json');
+      init.body = JSON.stringify(requestBody);
+    }
+
+    const response = await fetch(`${await this.get_sandbox_url()}${path}`, init);
+
+    const contentType = response.headers.get('Content-Type');
+    const responseBody = contentType?.startsWith('application/json') ? await response.json() : await response.text();
+
+    if (!response.ok) {
+      throw new SandboxRequestError(response, responseBody);
+    }
+
+    return responseBody;
+  }
+
+  async exec(
+    cmd: string,
+    cwd?: string,
+    env?: string,
+    signal?: AbortSignal,
+  ): Promise<{ stdout: string; stderr: string; code: number }> {
+    return this.request('/run', { method: 'POST', signal }, { cmd, cwd, env });
+  }
+
+  filesystem() {
+    return new SandboxFilesystem(this);
   }
 }
 
-// filesystem
-// exec
 // expose_port
 // unexpose_port
 // launch_process

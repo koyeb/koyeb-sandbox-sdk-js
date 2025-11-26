@@ -25,11 +25,11 @@ export class NoSandboxSecretError extends Error {
   }
 }
 
-export class RunFailedError extends Error {
+export class SandboxRequestError extends Error {
   constructor(
     public readonly response: Response,
     public readonly body: unknown,
   ) {
-    super('Sandbox executor run failed');
+    super('Sandbox executor request failed');
   }
 }

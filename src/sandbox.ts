@@ -239,14 +239,7 @@ export class Sandbox {
     return this.request('/run', { method: 'POST', signal }, { cmd, cwd, env });
   }
 
-  filesystem() {
+  get filesystem() {
     return new SandboxFilesystem(this);
   }
 }
-
-// expose_port
-// unexpose_port
-// launch_process
-// kill_process
-// list_processes
-// kill_all_processes

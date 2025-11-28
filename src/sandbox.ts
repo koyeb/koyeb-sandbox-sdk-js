@@ -2,6 +2,7 @@ import { KoyebApi, koyeb } from './api.js';
 import { DEFAULT_INSTANCE_WAIT_TIMEOUT, DEFAULT_POLL_INTERVAL } from './constants.js';
 import { MissingApiTokenError, NoSandboxSecretError, SandboxRequestError, SandboxTimeoutError } from './errors.js';
 import { SandboxFilesystem } from './sandbox-filesystem.js';
+import { TypedEventTarget } from './typed-event-target.js';
 import { assert, getEnv, isDefined, isUndefined, randomString, waitFor } from './utils.js';
 
 export type CreateSandboxOptions = Partial<{
@@ -18,6 +19,13 @@ export type CreateSandboxOptions = Partial<{
   enable_tcp_proxy: boolean;
   privileged: false;
   _experimental_enable_light_sleep: false;
+}>;
+
+type SandboxExec = TypedEventTarget<{
+  stdout: MessageEvent<{ stream: 'stdout'; data: string }>;
+  stderr: MessageEvent<{ stream: 'stderr'; data: string }>;
+  exit: MessageEvent<{ code: number; error: boolean }>;
+  end: Event;
 }>;
 
 export class Sandbox {
@@ -208,7 +216,7 @@ export class Sandbox {
     }
   }
 
-  async request(path: string, init: RequestInit, requestBody?: unknown) {
+  async fetch(path: string, init: RequestInit, requestBody?: unknown) {
     init.headers = new Headers(init.headers);
 
     init.headers.set('Authorization', `Bearer ${this.sandbox_secret}`);
@@ -218,7 +226,11 @@ export class Sandbox {
       init.body = JSON.stringify(requestBody);
     }
 
-    const response = await fetch(`${await this.get_sandbox_url()}${path}`, init);
+    return fetch(`${await this.get_sandbox_url()}${path}`, init);
+  }
+
+  async request(path: string, init: RequestInit, requestBody?: unknown) {
+    const response = await this.fetch(path, init, requestBody);
 
     const contentType = response.headers.get('Content-Type');
     const responseBody = contentType?.startsWith('application/json') ? await response.json() : await response.text();
@@ -230,16 +242,55 @@ export class Sandbox {
     return responseBody;
   }
 
+  get filesystem() {
+    return new SandboxFilesystem(this);
+  }
+
   async exec(
     cmd: string,
-    cwd?: string,
-    env?: string,
-    signal?: AbortSignal,
+    { cwd, env, signal }: { cwd?: string; env?: string; signal?: AbortSignal } = {},
   ): Promise<{ stdout: string; stderr: string; code: number }> {
     return this.request('/run', { method: 'POST', signal }, { cmd, cwd, env });
   }
 
-  get filesystem() {
-    return new SandboxFilesystem(this);
+  execStream(
+    cmd: string,
+    { cwd, env, signal }: { cwd?: string; env?: string; signal?: AbortSignal } = {},
+  ): SandboxExec {
+    const emitter: SandboxExec = new EventTarget();
+
+    this.fetch('/run_streaming', { method: 'POST', signal }, { cmd, cwd, env }).then(handleResponse);
+
+    return emitter;
+
+    function handleResponse(response: Response) {
+      assert(response.ok);
+      assert(response.body !== null);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      reader.read().then(function pump({ done, value }) {
+        for (const line of decoder.decode(value).split('\n')) {
+          if (line.startsWith('data: ')) {
+            const payload = JSON.parse(line.replace(/^data: /, ''));
+
+            if ('stream' in payload) {
+              emitter.dispatchEvent(new MessageEvent(payload.stream, { data: payload }));
+            }
+
+            if ('code' in payload) {
+              emitter.dispatchEvent(new MessageEvent('exit', { data: payload }));
+            }
+          }
+        }
+
+        if (done) {
+          emitter.dispatchEvent(new Event('end'));
+        } else {
+          reader.read().then(pump);
+        }
+      });
+    }
   }
 }

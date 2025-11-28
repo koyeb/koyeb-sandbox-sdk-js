@@ -4,21 +4,58 @@ This SDK allows to manage sandboxes within the Koyeb platform.
 
 ## Example
 
+_Synchronous_
+
 ```ts
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
 // or Sandbox.get_from_id(serviceId)
-const sandbox = await Sandbox.create({ name: 'file-ops', region: 'fra' });
+const sandbox = await Sandbox.create();
+
+const python_code = `#!/usr/bin/env python3
+print('Hello from Python!')
+`;
 
 try {
   const fs = sandbox.filesystem();
 
-  await fs.write_file('/tmp/script.py', "#!/usr/bin/env python3\nprint('Hello from Python!')");
+  await fs.write_file('/tmp/script.py', python_code);
   await sandbox.exec('chmod +x /tmp/script.py');
 
   const result = await sandbox.exec('/tmp/script.py');
 
   console.log(result.stdout);
+} finally {
+  sandbox.delete();
+}
+```
+
+_Streaming_
+
+```ts
+import { Sandbox } from '@koyeb/sandbox-sdk';
+
+const python_code = `#!/usr/bin/env python3
+
+import time
+
+for i in range(1, 10):
+  print("line %d" % i)
+  time.sleep(0.2)
+`;
+
+const sandbox = await Sandbox.create();
+
+try {
+  await sandbox.filesystem.write_file('/tmp/script.py', python_code);
+  await sandbox.exec('chmod +x /tmp/script.py');
+
+  const exec = sandbox.execStream('/tmp/script.py');
+
+  exec.addEventListener('stderr', ({ data }) => console.log(`stderr: ${data.data}`));
+  exec.addEventListener('stdout', ({ data }) => console.log(`stdout: ${data.data}`));
+  exec.addEventListener('exit', ({ data }) => console.log(`exit: ${data.code}`));
+  exec.addEventListener('end', () => console.log('end'));
 } finally {
   sandbox.delete();
 }

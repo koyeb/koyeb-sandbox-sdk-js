@@ -1,6 +1,6 @@
 {
   "name": "@koyeb/sandbox-sdk",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Koyeb Sandbox JavaScript SDK",
   "repository": "git://github.com/koyeb/koyeb-sandbox-sdk-js.git",
   "author": "Koyeb <support@koyeb.com>",

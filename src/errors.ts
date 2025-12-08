@@ -1,6 +1,14 @@
+import { PORT_MAX, PORT_MIN } from './constants.js';
+
 export class MissingApiTokenError extends Error {
   constructor() {
     super('API token is required. Set KOYEB_API_TOKEN environment variable or pass api_token parameter');
+  }
+}
+
+export class InvalidPortError extends Error {
+  constructor(value: number) {
+    super(`Port must be an integer between ${PORT_MIN} and ${PORT_MAX}, got ${value}`);
   }
 }
 

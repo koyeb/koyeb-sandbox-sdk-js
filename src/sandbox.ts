@@ -1,6 +1,12 @@
 import { KoyebApi, koyeb } from './api.js';
-import { DEFAULT_INSTANCE_WAIT_TIMEOUT, DEFAULT_POLL_INTERVAL } from './constants.js';
-import { MissingApiTokenError, NoSandboxSecretError, SandboxRequestError, SandboxTimeoutError } from './errors.js';
+import { DEFAULT_INSTANCE_WAIT_TIMEOUT, DEFAULT_POLL_INTERVAL, PORT_MAX, PORT_MIN } from './constants.js';
+import {
+  InvalidPortError,
+  MissingApiTokenError,
+  NoSandboxSecretError,
+  SandboxRequestError,
+  SandboxTimeoutError,
+} from './errors.js';
 import { SandboxFilesystem } from './sandbox-filesystem.js';
 import { TypedEventTarget } from './typed-event-target.js';
 import { assert, getEnv, isDefined, isUndefined, randomString, waitFor } from './utils.js';
@@ -301,6 +307,30 @@ export class Sandbox {
         }
       });
     }
+  }
+
+  async expose_port(port: number): Promise<{ port: number; exposed_at: string }> {
+    assert(port >= PORT_MIN && port <= PORT_MAX, new InvalidPortError(port));
+
+    await this.unexpose_port();
+    await this.request('/bind_port', { method: 'POST' }, { port: String(port) });
+
+    const domain = await this.get_domain();
+
+    assert(isDefined(domain.name));
+
+    return {
+      port,
+      exposed_at: `https://${domain.name}`,
+    };
+  }
+
+  async unexpose_port(port?: number) {
+    if (isDefined(port)) {
+      assert(port >= PORT_MIN && port <= PORT_MAX, new InvalidPortError(port));
+    }
+
+    await this.request('/unbind_port', { method: 'POST' }, { port: isDefined(port) ? String(port) : undefined });
   }
 
   async launch_process(cmd: string, options?: { cwd?: string; env?: Record<string, string> }): Promise<string> {

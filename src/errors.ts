@@ -30,6 +30,6 @@ export class SandboxRequestError extends Error {
     public readonly response: Response,
     public readonly body: unknown,
   ) {
-    super('Sandbox executor request failed');
+    super(`Sandbox executor request failed: ${response.status} ${response.statusText}`);
   }
 }

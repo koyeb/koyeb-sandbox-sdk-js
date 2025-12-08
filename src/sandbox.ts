@@ -21,12 +21,21 @@ export type CreateSandboxOptions = Partial<{
   _experimental_enable_light_sleep: false;
 }>;
 
-type SandboxExec = TypedEventTarget<{
+export type SandboxExec = TypedEventTarget<{
   stdout: MessageEvent<{ stream: 'stdout'; data: string }>;
   stderr: MessageEvent<{ stream: 'stderr'; data: string }>;
   exit: MessageEvent<{ code: number; error: boolean }>;
   end: Event;
 }>;
+
+export type SandboxProcess = {
+  id: string;
+  command: string;
+  status: SandboxProcessStatus;
+  pid: string;
+};
+
+export type SandboxProcessStatus = 'running' | 'completed' | 'failed' | 'killed';
 
 export class Sandbox {
   private readonly api: KoyebApi;
@@ -253,7 +262,7 @@ export class Sandbox {
     return this.request('/run', { method: 'POST', signal }, { cmd, cwd, env });
   }
 
-  execStream(
+  exec_stream(
     cmd: string,
     { cwd, env, signal }: { cwd?: string; env?: string; signal?: AbortSignal } = {},
   ): SandboxExec {
@@ -291,6 +300,28 @@ export class Sandbox {
           reader.read().then(pump);
         }
       });
+    }
+  }
+
+  async launch_process(cmd: string, options?: { cwd?: string; env?: Record<string, string> }): Promise<string> {
+    const response = await this.request('/start_process', { method: 'POST' }, { cmd, ...options });
+    return response.id;
+  }
+
+  async kill_process(processId: string): Promise<void> {
+    await this.request(`/kill_process`, { method: 'POST' }, { id: processId });
+  }
+
+  async list_processes(): Promise<SandboxProcess[]> {
+    const response = await this.request('/list_processes', { method: 'GET' });
+    return response.processes;
+  }
+
+  async kill_all_processes(): Promise<void> {
+    for await (const process of await this.list_processes()) {
+      if (process.status === 'running') {
+        await this.kill_process(process.id);
+      }
     }
   }
 }

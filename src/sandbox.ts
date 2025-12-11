@@ -24,6 +24,7 @@ export type CreateSandboxOptions = Partial<{
   idle_timeout: number;
   enable_tcp_proxy: boolean;
   privileged: false;
+  registry_secret?: string;
   _experimental_enable_light_sleep: false;
 }>;
 
@@ -82,7 +83,11 @@ export class Sandbox {
     const definition: koyeb.DeploymentDefinition = {
       name: opts.name,
       type: 'SANDBOX',
-      docker: { image: opts.image, privileged: opts.privileged },
+      docker: {
+        image: opts.image,
+        privileged: opts.privileged,
+        image_registry_secret: opts.registry_secret,
+      },
       instance_types: [{ type: opts.instance_type }],
       regions: [opts.region ?? 'na'],
       ports: [

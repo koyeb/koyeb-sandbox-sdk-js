@@ -12,8 +12,9 @@ export class SandboxFilesystem {
     await this.sandbox.request('/make_dir', { method: 'POST' }, { path, recursive });
   }
 
-  async list_dir(path = '.'): Promise<void> {
-    return this.sandbox.request('/list_dir', { method: 'POST' }, { path });
+  async list_dir(path = '.'): Promise<string[]> {
+    const result = await this.sandbox.request('/list_dir', { method: 'POST' }, { path });
+    return result.entries;
   }
 
   async delete_dir(path: string): Promise<void> {
@@ -22,6 +23,10 @@ export class SandboxFilesystem {
 
   async write_file(path: string, content: string): Promise<void> {
     await this.sandbox.request('/write_file', { method: 'POST' }, { path, content });
+  }
+
+  async write_files(files: Array<{ path: string; content: string }>): Promise<void> {
+    await Promise.all(files.map(({ path, content }) => this.write_file(path, content)));
   }
 
   async read_file(path: string): Promise<FileInfo> {
@@ -53,5 +58,19 @@ export class SandboxFilesystem {
   async is_dir(path: string): Promise<boolean> {
     const result = await this.sandbox.exec(`test -d ${path}`);
     return result.code === 0;
+  }
+
+  async upload_file(local_path: string, remote_path: string): Promise<void> {
+    const fs = await import('node:fs/promises');
+    const content = await fs.readFile(local_path);
+
+    await this.write_file(remote_path, content.toString());
+  }
+
+  async download_file(local_path: string, remote_path: string): Promise<void> {
+    const fs = await import('node:fs/promises');
+    const fileInfo = await this.read_file(remote_path);
+
+    await fs.writeFile(local_path, fileInfo.content);
   }
 }

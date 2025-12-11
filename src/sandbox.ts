@@ -48,9 +48,9 @@ export class Sandbox {
   private domain?: koyeb.Domain;
 
   constructor(
-    private readonly app_id: string,
-    private readonly service_id: string,
-    private readonly name: string,
+    public readonly app_id: string,
+    public readonly service_id: string,
+    public readonly name: string,
     private readonly sandbox_secret: string,
     private readonly api_token?: string,
   ) {
@@ -263,14 +263,14 @@ export class Sandbox {
 
   async exec(
     cmd: string,
-    { cwd, env, signal }: { cwd?: string; env?: string; signal?: AbortSignal } = {},
+    { cwd, env, signal }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal } = {},
   ): Promise<{ stdout: string; stderr: string; code: number }> {
     return this.request('/run', { method: 'POST', signal }, { cmd, cwd, env });
   }
 
   exec_stream(
     cmd: string,
-    { cwd, env, signal }: { cwd?: string; env?: string; signal?: AbortSignal } = {},
+    { cwd, env, signal }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal } = {},
   ): SandboxExec {
     const emitter: SandboxExec = new EventTarget();
 
@@ -347,11 +347,16 @@ export class Sandbox {
     return response.processes;
   }
 
-  async kill_all_processes(): Promise<void> {
-    for await (const process of await this.list_processes()) {
+  async kill_all_processes(): Promise<number> {
+    let count = 0;
+
+    for (const process of await this.list_processes()) {
       if (process.status === 'running') {
         await this.kill_process(process.id);
+        count++;
       }
     }
+
+    return count;
   }
 }

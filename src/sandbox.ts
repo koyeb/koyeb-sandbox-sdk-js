@@ -8,6 +8,7 @@ import {
   SandboxTimeoutError,
 } from './errors.js';
 import { SandboxFilesystem } from './sandbox-filesystem.js';
+import { handleServerSentEvents } from './server-sent-event.js';
 import { TypedEventTarget } from './typed-event-target.js';
 import { assert, getEnv, isDefined, isUndefined, randomString, waitFor } from './utils.js';
 
@@ -277,41 +278,14 @@ export class Sandbox {
     cmd: string,
     { cwd, env, signal }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal } = {},
   ): SandboxExec {
-    const emitter: SandboxExec = new EventTarget();
+    const emitter = new EventTarget();
 
-    this.fetch('/run_streaming', { method: 'POST', signal }, { cmd, cwd, env }).then(handleResponse);
+    this.fetch('/run_streaming', { method: 'POST', signal }, { cmd, cwd, env })
+      .then((response) => response.body)
+      .then((body) => body && handleServerSentEvents(emitter, body))
+      .catch((error) => emitter.dispatchEvent(new MessageEvent('error', { data: error })));
 
     return emitter;
-
-    function handleResponse(response: Response) {
-      assert(response.ok);
-      assert(response.body !== null);
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-
-      reader.read().then(function pump({ done, value }) {
-        for (const line of decoder.decode(value).split('\n')) {
-          if (line.startsWith('data: ')) {
-            const payload = JSON.parse(line.replace(/^data: /, ''));
-
-            if ('stream' in payload) {
-              emitter.dispatchEvent(new MessageEvent(payload.stream, { data: payload }));
-            }
-
-            if ('code' in payload) {
-              emitter.dispatchEvent(new MessageEvent('exit', { data: payload }));
-            }
-          }
-        }
-
-        if (done) {
-          emitter.dispatchEvent(new Event('end'));
-        } else {
-          reader.read().then(pump);
-        }
-      });
-    }
   }
 
   async expose_port(port: number): Promise<{ port: number; exposed_at: string }> {

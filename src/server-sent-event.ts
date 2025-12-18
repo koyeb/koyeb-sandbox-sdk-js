@@ -6,13 +6,13 @@ export function handleServerSentEvents(emitter: EventTarget, stream: ReadableStr
 
   return reader.read().then(pump);
 
-  function pump({ done, value }: ReadableStreamReadResult<Uint8Array<ArrayBuffer>>) {
+  async function pump({ done, value }: ReadableStreamReadResult<Uint8Array<ArrayBuffer>>) {
     handleChunk(decoder.decode(value));
 
     if (done) {
       handleChunk(buffer);
     } else {
-      reader.read().then(pump);
+      await reader.read().then(pump);
     }
   }
 

@@ -26,6 +26,8 @@ export type CreateSandboxOptions = Partial<{
   enable_tcp_proxy: boolean;
   privileged: false;
   registry_secret?: string;
+  delete_after_create?: number;
+  delete_after_sleep?: number;
   _experimental_enable_light_sleep: false;
 }>;
 
@@ -143,6 +145,10 @@ export class Sandbox {
     const service = await api.createService({
       app_id: app.id,
       definition,
+      life_cycle: {
+        delete_after_create: opts.delete_after_create,
+        delete_after_sleep: opts.delete_after_sleep,
+      },
     });
 
     const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, sandbox_secret, token);

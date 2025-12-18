@@ -85,8 +85,8 @@ export class KoyebApi {
     return response!.service!;
   }
 
-  async createService(body: Body<'createService'>) {
-    const response = await this.api(koyeb.createService({ ...this.params, body }));
+  async createService(body: Body<'createService'>, query?: Query<'createService'>) {
+    const response = await this.api(koyeb.createService({ ...this.params, query, body }));
     return response!.service!;
   }
 

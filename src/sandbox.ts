@@ -135,22 +135,7 @@ export class Sandbox {
       definition.proxy_ports = [{ port: 3031, protocol: 'tcp' }];
     }
 
-    const api = new KoyebApi(token);
-
-    const app = await api.createApp({
-      name: `sandbox-app-${opts.name}-${Date.now()}`,
-      life_cycle: { delete_when_empty: true },
-    });
-
-    const service = await api.createService({
-      app_id: app.id,
-      definition,
-      life_cycle: {
-        delete_after_create: opts.delete_after_create,
-        delete_after_sleep: opts.delete_after_sleep,
-      },
-    });
-
+    const service = await this.createService(token, opts, definition);
     const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, sandbox_secret, token);
 
     if (opts.wait_ready && !(await sandbox.wait_ready(opts.timeout))) {
@@ -158,6 +143,35 @@ export class Sandbox {
     }
 
     return sandbox;
+  }
+
+  private static async createService(
+    token: string,
+    opts: CreateSandboxOptions,
+    definition: koyeb.DeploymentDefinition,
+  ) {
+    const api = new KoyebApi(token);
+
+    await api.createService({ app_id: '74140198-4d29-4a1e-bdc9-5cc2b355ccd0', definition }, { dry_run: true });
+
+    const app = await api.createApp({
+      name: `sandbox-app-${opts.name}-${Date.now()}`,
+      life_cycle: { delete_when_empty: true },
+    });
+
+    try {
+      return await api.createService({
+        app_id: app.id,
+        definition,
+        life_cycle: {
+          delete_after_create: opts.delete_after_create,
+          delete_after_sleep: opts.delete_after_sleep,
+        },
+      });
+    } catch (error) {
+      await api.deleteApp(app.id!);
+      throw error;
+    }
   }
 
   static async get_from_id(serviceId: string, apiToken?: string) {

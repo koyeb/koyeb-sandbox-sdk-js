@@ -1,6 +1,7 @@
 import * as koyeb from '@koyeb/api-client-js';
 import { DEFAULT_API_HOST } from './constants.js';
-import { getEnv } from './utils.js';
+import { formatRequest, formatResponse } from './format.js';
+import { assert, getEnv } from './utils.js';
 
 export type { koyeb };
 
@@ -15,7 +16,10 @@ type Body<E extends Endpoint> = EndpointParam<E> extends { body?: infer T } ? T 
 export class KoyebApi {
   private readonly baseUrl: string;
 
-  constructor(private readonly token?: string) {
+  constructor(
+    private readonly token?: string,
+    private readonly debug = process.env.KOYEB_DEBUG === 'true',
+  ) {
     this.baseUrl = getEnv('KOYEB_API_HOST') ?? DEFAULT_API_HOST;
   }
 
@@ -35,8 +39,26 @@ export class KoyebApi {
     return {
       baseUrl: this.baseUrl,
       auth: `Bearer ${this.token}`,
+      fetch: this.fetch,
     };
   }
+
+  private fetch: typeof globalThis.fetch = async (request) => {
+    assert(request instanceof Request);
+
+    if (this.debug) {
+      console.debug(await formatRequest(request));
+    }
+
+    const response = await globalThis.fetch(request);
+
+    if (this.debug) {
+      console.debug(await formatResponse(response));
+      console.debug();
+    }
+
+    return response;
+  };
 
   async getApp(id: string) {
     const response = await this.api(koyeb.getApp({ ...this.params, path: { id } }));

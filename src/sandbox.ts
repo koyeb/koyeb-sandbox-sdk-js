@@ -134,8 +134,16 @@ export class Sandbox {
     }
 
     const api = new KoyebApi(token);
-    const app = await api.createApp(`sandbox-app-${opts.name}-${Date.now()}`);
-    const service = await api.createService({ app_id: app.id, definition });
+
+    const app = await api.createApp({
+      name: `sandbox-app-${opts.name}-${Date.now()}`,
+      life_cycle: { delete_when_empty: true },
+    });
+
+    const service = await api.createService({
+      app_id: app.id,
+      definition,
+    });
 
     const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, sandbox_secret, token);
 
@@ -228,13 +236,7 @@ export class Sandbox {
   }
 
   async delete(): Promise<void> {
-    const services = await this.api.listServices({ app_id: this.app_id });
-
-    if (services.length === 1) {
-      await this.api.deleteApp(this.app_id);
-    } else {
-      await this.api.deleteService(this.service_id);
-    }
+    await this.api.deleteService(this.service_id);
   }
 
   async fetch(path: string, init: RequestInit, requestBody?: unknown) {

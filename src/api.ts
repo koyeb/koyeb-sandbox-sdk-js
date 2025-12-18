@@ -43,8 +43,8 @@ export class KoyebApi {
     return response!.app!;
   }
 
-  async createApp(name: string) {
-    const response = await this.api(koyeb.createApp({ ...this.params, body: { name } }));
+  async createApp(body: Body<'createApp'>) {
+    const response = await this.api(koyeb.createApp({ ...this.params, body }));
     return response!.app!;
   }
 

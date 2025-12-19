@@ -54,23 +54,22 @@ Creates a new sandbox.
 
 #### Options
 
-| Option                  | Description                                                             |
-| ----------------------- | ----------------------------------------------------------------------- |
-| `image`                 | Docker image to boot. Defaults to `koyeb/sandbox`.                      |
-| `name`                  | Name shown in Koyeb and used in resource names.                         |
-| `wait_ready`            | Wait until the sandbox becomes healthy (enabled by default)             |
-| `instance_type`         | Instance size to provision. Defaults to `micro`.                        |
-| `exposed_port_protocol` | Protocol used by the exposed port (one of `http \| http2`).             |
-| `env`                   | Environment variables injected into the container.                      |
-| `region`                | Koyeb region slug. Defaults to `'na'` (north america).                  |
-| `api_token`             | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`. |
-| `timeout`               | Seconds to wait while checking readiness.                               |
-| `idle_timeout`          | Seconds before the sandbox scales to zero. Set `0` to disable sleep.    |
-| `enable_tcp_proxy`      | Enable TCP proxying on port 3031.                                       |
-| `privileged`            | Run the sandbox in privileged mode.                                     |
-| `registry_secret`       | Name of the Koyeb registry secret required to pull private images.      |
-| `delete_after_create`   | Auto-delete the sandbox after N seconds from creation.                  |
-| `delete_after_sleep`    | Auto-delete after being asleep for N seconds.                           |
+| Option                             | Description                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------ |
+| `image`                            | Docker image to boot. Defaults to `koyeb/sandbox`.                       |
+| `name`                             | Name shown in Koyeb and used in resource names.                          |
+| `wait_ready`                       | Wait until the sandbox becomes healthy (enabled by default)              |
+| `instance_type`                    | Instance size to provision. Defaults to `micro`.                         |
+| `exposed_port_protocol`            | Protocol used by the exposed port (one of `http \| http2`).              |
+| `env`                              | Environment variables injected into the container.                       |
+| `region`                           | Koyeb region slug. Defaults to `'na'` (north america).                   |
+| `api_token`                        | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`.  |
+| `timeout`                          | Seconds to wait while checking readiness.                                |
+| `idle_timeout`                     | Seconds before the sandbox scales to zero. Set `0` to disable sleep.     |
+| `enable_tcp_proxy`                 | Enable TCP proxying on port 3031.                                        |
+| `privileged`                       | Run the sandbox in privileged mode.                                      |
+| `registry_secret`                  | Name of the Koyeb registry secret required to pull private images.       |
+| `_experimental_enable_light_sleep` | When enable, uses idle_timeout for light_sleep and sets deep_sleep=3900. |
 
 ### `Sandbox.get_from_id(serviceId, apiToken?)`
 

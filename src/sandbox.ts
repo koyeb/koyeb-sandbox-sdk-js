@@ -156,7 +156,7 @@ export class Sandbox {
 
     const app = await api.createApp({
       name: `sandbox-app-${opts.name}-${Date.now()}`,
-      life_cycle: { delete_when_empty: true },
+      life_cycle: {},
     });
 
     try {
@@ -256,7 +256,7 @@ export class Sandbox {
   }
 
   async delete(): Promise<void> {
-    await this.api.deleteService(this.service_id);
+    await this.api.deleteApp(this.app_id);
   }
 
   async fetch(path: string, init: RequestInit, requestBody?: unknown) {

@@ -1,4 +1,4 @@
-import { KoyebApi, koyeb } from './api.js';
+import { koyeb, KoyebApi } from './api.js';
 import { DEFAULT_INSTANCE_WAIT_TIMEOUT, DEFAULT_POLL_INTERVAL, PORT_MAX, PORT_MIN } from './constants.js';
 import {
   InvalidPortError,
@@ -10,7 +10,7 @@ import {
 import { SandboxFilesystem } from './sandbox-filesystem.js';
 import { handleServerSentEvents } from './server-sent-event.js';
 import { TypedEventTarget } from './typed-event-target.js';
-import { assert, getEnv, isDefined, isUndefined, randomString, waitFor } from './utils.js';
+import { assert, Duration, getEnv, isDefined, isUndefined, parseDuration, randomString, waitFor } from './utils.js';
 
 export type CreateSandboxOptions = Partial<{
   image: string;
@@ -26,8 +26,8 @@ export type CreateSandboxOptions = Partial<{
   enable_tcp_proxy: boolean;
   privileged: false;
   registry_secret?: string;
-  delete_after_create?: number;
-  delete_after_sleep?: number;
+  delete_after_delay?: Duration;
+  delete_after_inactivity_delay?: Duration;
   _experimental_enable_light_sleep: false;
 }>;
 
@@ -164,8 +164,8 @@ export class Sandbox {
         app_id: app.id,
         definition,
         life_cycle: {
-          delete_after_create: opts.delete_after_create,
-          delete_after_sleep: opts.delete_after_sleep,
+          delete_after_create: parseDuration(opts.delete_after_delay),
+          delete_after_sleep: parseDuration(opts.delete_after_inactivity_delay),
         },
       });
     } catch (error) {
@@ -253,6 +253,22 @@ export class Sandbox {
     assert(name);
 
     return `https://${name}/koyeb-sandbox`;
+  }
+
+  async update_lifecycle(values?: {
+    delete_after_delay?: Duration;
+    delete_after_inactivity_delay?: Duration;
+  }): Promise<void> {
+    const service = await this.api.getService(this.service_id);
+    const deployment = await this.api.getDeployment(service.latest_deployment_id!);
+
+    await this.api.updateService(this.service_id, {
+      definition: deployment.definition,
+      life_cycle: {
+        delete_after_create: parseDuration(values?.delete_after_delay),
+        delete_after_sleep: parseDuration(values?.delete_after_inactivity_delay),
+      },
+    });
   }
 
   async delete(): Promise<void> {

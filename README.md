@@ -69,6 +69,8 @@ Creates a new sandbox.
 | `enable_tcp_proxy`                 | Enable TCP proxying on port 3031.                                        |
 | `privileged`                       | Run the sandbox in privileged mode.                                      |
 | `registry_secret`                  | Name of the Koyeb registry secret required to pull private images.       |
+| `delete_after_delay`               | Time to wait before automatically deleting the sandbox after creation.   |
+| `delete_after_inactivity_delay`    | Time to wait before automatically deleting the sandbox after inactivity. |
 | `_experimental_enable_light_sleep` | When enable, uses idle_timeout for light_sleep and sets deep_sleep=3900. |
 
 ### `Sandbox.get_from_id(serviceId, apiToken?)`
@@ -85,6 +87,7 @@ Load an existing Sandbox from a Koyeb service ID. Useful for long-lived integrat
 | `get_sandbox_url()`                                      | Returns the HTTPS URL (`https://<domain>/koyeb-sandbox`).                        |
 | `get_tcp_proxy_info()`                                   | Returns `[host, publicPort]` once the TCP proxy is ready, otherwise `undefined`. |
 | `get_domain()`                                           | Fetches and caches the sandbox domain metadata.                                  |
+| `update_lifecycle()`                                     | Change the auto deletion properties.                                             |
 | `delete()`                                               | Tears down the underlying service.                                               |
 
 ## Command Execution

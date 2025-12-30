@@ -90,6 +90,11 @@ export class KoyebApi {
     return response!.service!;
   }
 
+  async updateService(id: string, body: Body<'updateService'>, query?: Query<'updateService'>) {
+    const response = await this.api(koyeb.updateService({ ...this.params, path: { id }, query, body }));
+    return response!.service!;
+  }
+
   async deleteService(id: string) {
     const response = await this.api(koyeb.deleteService({ ...this.params, path: { id } }));
     return response!.service!;

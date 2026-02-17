@@ -10,7 +10,17 @@ import {
 import { SandboxFilesystem } from './sandbox-filesystem.js';
 import { handleServerSentEvents } from './server-sent-event.js';
 import { TypedEventTarget } from './typed-event-target.js';
-import { assert, Duration, getEnv, isDefined, isUndefined, parseDuration, randomString, waitFor } from './utils.js';
+import {
+  assert,
+  Duration,
+  getEnv,
+  isDefined,
+  isUndefined,
+  omitUndefined,
+  parseDuration,
+  randomString,
+  waitFor,
+} from './utils.js';
 
 export type CreateSandboxOptions = Partial<{
   image: string;
@@ -76,7 +86,7 @@ export class Sandbox {
   } satisfies CreateSandboxOptions;
 
   static async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
-    const opts = { ...this.defaultCreateSandboxOptions, ...options };
+    const opts = { ...this.defaultCreateSandboxOptions, ...omitUndefined(options) };
     const token = opts.api_token ?? getEnv('KOYEB_API_TOKEN');
 
     if (!token) {
@@ -112,24 +122,19 @@ export class Sandbox {
       definition.env.push({ key, value });
     }
 
-    const { idle_timeout } = opts;
-    let sleep_idle_delay: koyeb.DeploymentScalingTargetSleepIdleDelay | undefined = undefined;
+    if (opts.idle_timeout > 0) {
+      let sleep_idle_delay: koyeb.DeploymentScalingTargetSleepIdleDelay;
 
-    if (idle_timeout > 0) {
       if (opts._experimental_enable_light_sleep) {
-        sleep_idle_delay = { light_sleep_value: idle_timeout, deep_sleep_value: 3900 };
+        sleep_idle_delay = { light_sleep_value: opts.idle_timeout, deep_sleep_value: 3900 };
       } else {
-        sleep_idle_delay = { deep_sleep_value: idle_timeout };
+        sleep_idle_delay = { deep_sleep_value: opts.idle_timeout };
       }
-    }
 
-    definition.scalings = [
-      {
-        min: sleep_idle_delay ? 0 : 1,
-        max: 1,
-        targets: [{ sleep_idle_delay }],
-      },
-    ];
+      definition.scalings = [{ min: 0, max: 1, targets: [{ sleep_idle_delay }] }];
+    } else {
+      definition.scalings = [{ min: 1, max: 1 }];
+    }
 
     if (opts.enable_tcp_proxy) {
       definition.proxy_ports = [{ port: 3031, protocol: 'tcp' }];

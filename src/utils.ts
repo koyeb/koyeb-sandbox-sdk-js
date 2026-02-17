@@ -12,6 +12,10 @@ export function assert(condition: unknown, error = new Error('Assertion failed')
   }
 }
 
+export function omitUndefined<T extends object>(object: T): T {
+  return Object.fromEntries(Object.entries(object).filter(([_, value]) => value !== undefined)) as T;
+}
+
 export function createArray<T>(length: number, init: (index: number) => T) {
   return Array(length)
     .fill(null)

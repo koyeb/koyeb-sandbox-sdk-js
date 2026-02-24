@@ -24,11 +24,11 @@ export type CreateSandboxOptions = Partial<{
   timeout: number;
   idle_timeout: number;
   enable_tcp_proxy: boolean;
-  privileged: false;
+  privileged: boolean;
   registry_secret?: string;
   delete_after_delay?: Duration;
   delete_after_inactivity_delay?: Duration;
-  _experimental_enable_light_sleep: false;
+  _experimental_enable_light_sleep: boolean;
 }>;
 
 export type SandboxExec = TypedEventTarget<{

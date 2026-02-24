@@ -71,7 +71,7 @@ Creates a new sandbox.
 | `registry_secret`                  | Name of the Koyeb registry secret required to pull private images.       |
 | `delete_after_delay`               | Time to wait before automatically deleting the sandbox after creation.   |
 | `delete_after_inactivity_delay`    | Time to wait before automatically deleting the sandbox after inactivity. |
-| `_experimental_enable_light_sleep` | When enable, uses idle_timeout for light_sleep and sets deep_sleep=3900. |
+| `_experimental_enable_light_sleep` | When enabled, uses idle_timeout for light_sleep and sets deep_sleep=3900. |
 
 ### `Sandbox.get_from_id(serviceId, apiToken?)`
 

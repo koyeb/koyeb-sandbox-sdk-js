@@ -1,5 +1,5 @@
 import { koyeb, KoyebApi } from './api.js';
-import { DEFAULT_INSTANCE_WAIT_TIMEOUT, DEFAULT_POLL_INTERVAL, PORT_MAX, PORT_MIN } from './constants.js';
+import { DEFAULT_IDLE_TIMEOUT, DEFAULT_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT, PORT_MAX, PORT_MIN } from './constants.js';
 import {
   InvalidPortError,
   MissingApiTokenError,
@@ -81,8 +81,8 @@ export class Sandbox {
     wait_ready: true,
     instance_type: 'micro',
     exposed_port_protocol: 'http',
-    timeout: DEFAULT_INSTANCE_WAIT_TIMEOUT,
-    idle_timeout: 300,
+    timeout: DEFAULT_WAIT_TIMEOUT,
+    idle_timeout: DEFAULT_IDLE_TIMEOUT,
   } satisfies CreateSandboxOptions;
 
   static async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
@@ -198,7 +198,7 @@ export class Sandbox {
   }
 
   async wait_ready(
-    timeout = DEFAULT_INSTANCE_WAIT_TIMEOUT,
+    timeout = DEFAULT_WAIT_TIMEOUT,
     pollInterval = DEFAULT_POLL_INTERVAL,
     signal?: AbortSignal,
   ): Promise<boolean> {
@@ -206,7 +206,7 @@ export class Sandbox {
   }
 
   async wait_tcp_proxy_ready(
-    timeout = DEFAULT_INSTANCE_WAIT_TIMEOUT,
+    timeout = DEFAULT_WAIT_TIMEOUT,
     pollInterval = DEFAULT_POLL_INTERVAL,
     signal?: AbortSignal,
   ): Promise<boolean> {

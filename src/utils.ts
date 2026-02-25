@@ -60,8 +60,8 @@ export async function waitFor(
       return true;
     }
 
-    await wait(interval, signal);
-  } while (Date.now() - start < timeout);
+    await wait(interval * 1_000, signal);
+  } while (Date.now() - start < timeout * 1_000);
 
   return false;
 }

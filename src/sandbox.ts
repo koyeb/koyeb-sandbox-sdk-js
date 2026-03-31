@@ -57,9 +57,16 @@ export type SandboxProcess = {
 
 export type SandboxProcessStatus = 'running' | 'completed' | 'failed' | 'killed';
 
+type ConnectionInfo = {
+  public_url: string;
+  routing_key?: string;
+  secret: string;
+};
+
 export class Sandbox {
   private readonly api: KoyebApi;
-  private domain?: koyeb.Domain;
+  private _conn_info?: ConnectionInfo;
+  private _domain?: string;
 
   constructor(
     public readonly app_id: string,
@@ -214,8 +221,14 @@ export class Sandbox {
   }
 
   async is_healthy(): Promise<boolean> {
-    const url = await this.get_sandbox_url();
-    const response = await fetch(`${url}/health`);
+    const conn = await this.get_conn_info();
+    const headers: Record<string, string> = { Authorization: `Bearer ${conn.secret}` };
+
+    if (conn.routing_key) {
+      headers['X-Routing-Key'] = conn.routing_key;
+    }
+
+    const response = await fetch(`${conn.public_url}/health`, { headers });
 
     return response.ok;
   }
@@ -237,27 +250,84 @@ export class Sandbox {
     return [proxy_port.host!, proxy_port.public_port!];
   }
 
-  async get_domain() {
-    if (this.domain) {
-      return this.domain;
-    }
-
+  private async get_domain_from_app(): Promise<string> {
     const app = await this.api.getApp(this.app_id);
     const domain = app.domains?.[0];
 
-    assert(domain);
-    this.domain = domain;
+    assert(domain?.name);
 
-    return this.domain;
+    return `https://${domain.name}`;
+  }
+
+  async get_domain(): Promise<string> {
+    if (this._domain) {
+      return this._domain;
+    }
+
+    const metadata = await this.get_metadata_connection_info();
+
+    if (metadata) {
+      const raw = metadata.public_url;
+      const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
+      url.pathname = `${url.pathname.replace(/\/+$/, '')}/r/${metadata.routing_key}/`;
+      this._domain = url.toString();
+      return this._domain;
+    }
+
+    this._domain = await this.get_domain_from_app();
+    return this._domain;
+  }
+
+  private async get_metadata_connection_info(): Promise<{ public_url: string; routing_key: string } | undefined> {
+    try {
+      const service = await this.api.getService(this.service_id);
+      const deploymentId = service.active_deployment_id || service.latest_deployment_id;
+      if (!deploymentId) return;
+
+      const deployment = await this.api.getDeployment(deploymentId);
+      const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)
+        ?.sandbox;
+
+      if (sandbox?.public_url && sandbox?.routing_key) {
+        return { public_url: sandbox.public_url, routing_key: sandbox.routing_key };
+      }
+    } catch {
+      return;
+    }
+  }
+
+  async get_conn_info(): Promise<ConnectionInfo> {
+    if (this._conn_info) {
+      return this._conn_info;
+    }
+
+    const metadata = await this.get_metadata_connection_info();
+
+    if (metadata) {
+      this._conn_info = {
+        public_url: `${metadata.public_url}/koyeb-sandbox`,
+        routing_key: metadata.routing_key,
+        secret: this.sandbox_secret,
+      };
+      return this._conn_info;
+    }
+
+    const domain = await this.get_domain_from_app();
+    this._conn_info = {
+      public_url: `https://${domain}/koyeb-sandbox`,
+      secret: this.sandbox_secret,
+    };
+    return this._conn_info;
   }
 
   async get_sandbox_url(): Promise<string> {
-    const domain = await this.get_domain();
-    const name = domain.name;
+    const conn_info = await this.get_conn_info();
 
-    assert(name);
+    if (conn_info.routing_key) {
+      return `${conn_info.public_url}/r/${conn_info.routing_key}`;
+    }
 
-    return `https://${name}/koyeb-sandbox`;
+    return conn_info.public_url;
   }
 
   async update_lifecycle(values?: {
@@ -281,16 +351,21 @@ export class Sandbox {
   }
 
   async fetch(path: string, init: RequestInit, requestBody?: unknown) {
+    const conn = await this.get_conn_info();
     init.headers = new Headers(init.headers);
 
-    init.headers.set('Authorization', `Bearer ${this.sandbox_secret}`);
+    init.headers.set('Authorization', `Bearer ${conn.secret}`);
+
+    if (conn.routing_key) {
+      init.headers.set('X-Routing-Key', conn.routing_key);
+    }
 
     if (isDefined(requestBody)) {
       init.headers.set('Content-Type', 'application/json');
       init.body = JSON.stringify(requestBody);
     }
 
-    return fetch(`${await this.get_sandbox_url()}${path}`, init);
+    return fetch(`${conn.public_url}${path}`, init);
   }
 
   async request(path: string, init: RequestInit, requestBody?: unknown) {
@@ -339,11 +414,9 @@ export class Sandbox {
 
     const domain = await this.get_domain();
 
-    assert(isDefined(domain.name));
-
     return {
       port,
-      exposed_at: `https://${domain.name}`,
+      exposed_at: `${domain}`,
     };
   }
 

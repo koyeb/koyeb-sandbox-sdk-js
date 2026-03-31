@@ -9,8 +9,8 @@ importers:
   .:
     devDependencies:
       '@koyeb/api-client-js':
-        specifier: ^1.1.6
-        version: 1.1.6
+        specifier: ^1.1.7
+        version: 1.1.7
       '@types/node':
         specifier: ^24.10.4
         version: 24.10.4
@@ -23,8 +23,8 @@ importers:
 
 packages:
 
-  '@koyeb/api-client-js@1.1.6':
-    resolution: {integrity: sha512-sznaHexRMy4xu0Rix+Jsi/LXxnCTu+eEtT+TGwDePteeBBukFLgCUl8w29B/C143iQBNhw8bAVQ3Dxo+01GG1g==}
+  '@koyeb/api-client-js@1.1.7':
+    resolution: {integrity: sha512-oZfAhb0nOeWCKq23cSA2HnYRssNQ2uBwoyxIV3Qgl4Ud6VTyHaqhtaPPtNgHlteW80o0acN8K5rL8kddjzppLA==}
 
   '@types/node@24.10.4':
     resolution: {integrity: sha512-vnDVpYPMzs4wunl27jHrfmwojOGKya0xyM3sH+UE5iv5uPS6vX7UIoh6m+vQc5LGBq52HBKPIn/zcSZVzeDEZg==}
@@ -44,7 +44,7 @@ packages:
 
 snapshots:
 
-  '@koyeb/api-client-js@1.1.6': {}
+  '@koyeb/api-client-js@1.1.7': {}
 
   '@types/node@24.10.4':
     dependencies:

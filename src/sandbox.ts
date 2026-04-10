@@ -95,6 +95,7 @@ export class Sandbox {
   static async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
     const opts = { ...this.defaultCreateSandboxOptions, ...omitUndefined(options) };
     const token = opts.api_token ?? getEnv('KOYEB_API_TOKEN');
+    const region = opts.region ?? getEnv('KOYEB_REGION') ?? 'na';
 
     if (!token) {
       throw new MissingApiTokenError();
@@ -109,7 +110,7 @@ export class Sandbox {
         image_registry_secret: opts.registry_secret,
       },
       instance_types: [{ type: opts.instance_type }],
-      regions: [opts.region ?? 'na'],
+      regions: [region],
       ports: [
         { port: 3030, protocol: 'http' },
         { port: 3031, protocol: opts.exposed_port_protocol },

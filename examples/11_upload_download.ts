@@ -1,12 +1,15 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
-import { execSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { readFile, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const sandbox = await Sandbox.create({ name: 'upload-download' });
 const fs = sandbox.filesystem;
 
-const local_file = execSync('mktemp -u --suffix _local.txt').toString().trim();
-const downloaded_file = execSync('mktemp -u --suffix _downloaded.txt').toString().trim();
+const tmpName = (suffix: string) => join(tmpdir(), `tmp-${randomBytes(6).toString('hex')}${suffix}`);
+const local_file = tmpName('_local.txt');
+const downloaded_file = tmpName('_downloaded.txt');
 
 async function main() {
   await writeFile(local_file, 'This is a local file\nUploaded to Koyeb Sandbox!');

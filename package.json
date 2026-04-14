@@ -20,7 +20,7 @@
     "@koyeb/api-client-js": "^1.0.0"
   },
   "devDependencies": {
-    "@koyeb/api-client-js": "^1.1.6",
+    "@koyeb/api-client-js": "^1.1.7",
     "@types/node": "^24.10.4",
     "prettier": "^3.7.4",
     "typescript": "^5.9.3"

@@ -2,6 +2,24 @@ import { Sandbox } from '@koyeb/sandbox-sdk';
 
 const sandbox = await Sandbox.create({ name: 'expose-port' });
 
+async function retry(fn: () => Promise<Response>, retries = 5, delay = 1000): Promise<Response> {
+  try {
+    let res = await fn();
+    if (!res.ok) {
+      throw new Error(`Status: ${res.status}`);
+    }
+    return res;
+  } catch (error) {
+    if (retries > 0) {
+      console.warn(`Retrying... (${retries} attempts left)`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      return retry(fn, retries - 1, delay);
+    } else {
+      throw error;
+    }
+  }
+}
+
 async function main() {
   console.log('\nCreating test file...');
   await sandbox.filesystem.write_file('/tmp/test.html', '<h1>Hello from Sandbox!</h1><p>Port 8080</p>');
@@ -23,7 +41,7 @@ async function main() {
   await new Promise((resolve) => setTimeout(resolve, 2000));
 
   console.log('\nMaking HTTP request to verify port exposure...');
-  let res = await fetch(`${exposed.exposed_at}/test.html`);
+  let res = await retry(() => fetch(`${exposed.exposed_at}/test.html`));
 
   if (!res.ok) {
     throw new Error(`Status: ${res.status}`);
@@ -56,7 +74,7 @@ async function main() {
   await new Promise((resolve) => setTimeout(resolve, 2000));
 
   console.log('\nMaking HTTP request to verify port 8081...');
-  res = await fetch(`${exposed.exposed_at}/test2.html`);
+  res = await retry(() => fetch(`${exposed.exposed_at}/test2.html`));
 
   if (!res.ok) {
     throw new Error(`Status: ${res.status}`);

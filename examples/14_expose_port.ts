@@ -6,7 +6,7 @@ async function retry(fn: () => Promise<Response>, retries = 5, delay = 1000): Pr
   try {
     let res = await fn();
     if (!res.ok) {
-        throw new Error(`Status: ${res.status}`);
+      throw new Error(`Status: ${res.status}`);
     }
     return res;
   } catch (error) {

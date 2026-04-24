@@ -257,7 +257,7 @@ export class Sandbox {
 
     assert(domain?.name);
 
-    return `https://${domain.name}`;
+    return domain.name;
   }
 
   async get_domain(): Promise<string> {

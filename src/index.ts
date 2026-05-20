@@ -1,2 +1,11 @@
 export * from './errors.js';
-export { Sandbox } from './sandbox.js';
+export { KoyebApi, type koyeb } from './api.js';
+export {
+  Sandbox,
+  type ConfigFile,
+  type CreateSandboxOptions,
+  type EnvValue,
+  type SandboxExec,
+  type SandboxProcess,
+  type SandboxProcessStatus,
+} from './sandbox.js';

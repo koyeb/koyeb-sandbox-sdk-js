@@ -1,3 +1,62 @@
+import type { koyeb } from './api.js';
+import type { ConfigFile, EnvValue } from './sandbox.js';
+
+export const DEFAULT_CONFIG_FILE_PERMISSIONS = '0644';
+
+/**
+ * Render an environment / config-file value to its on-the-wire string.
+ *
+ * - `string` is returned verbatim (server interpolates `{{ X }}` and `{{ secret.foo }}`).
+ * - An object with `name` (including a full `koyeb.Secret`) becomes `"{{ secret.<name> }}"`.
+ */
+export function renderEnvValue(value: EnvValue): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (!value.name) {
+    throw new Error('Secret reference must have a non-empty `name` field');
+  }
+
+  return `{{ secret.${value.name} }}`;
+}
+
+export function buildEnvVars(env?: Record<string, EnvValue>): koyeb.DeploymentEnv[] {
+  if (!env) {
+    return [];
+  }
+
+  return Object.entries(env).map(([key, value]) => ({ key, value: renderEnvValue(value) }));
+}
+
+function isConfigFile(value: EnvValue | ConfigFile): value is ConfigFile {
+  return typeof value === 'object' && value !== null && 'content' in value;
+}
+
+export function buildConfigFiles(
+  files?: Record<string, EnvValue | ConfigFile>,
+): koyeb.ConfigFile[] {
+  if (!files) {
+    return [];
+  }
+
+  return Object.entries(files).map(([path, value]) => {
+    if (isConfigFile(value)) {
+      return {
+        path,
+        content: renderEnvValue(value.content),
+        permissions: value.permissions ?? DEFAULT_CONFIG_FILE_PERMISSIONS,
+      };
+    }
+
+    return {
+      path,
+      content: renderEnvValue(value),
+      permissions: DEFAULT_CONFIG_FILE_PERMISSIONS,
+    };
+  });
+}
+
 export function isUndefined<T>(value: T | undefined): value is undefined {
   return value === undefined;
 }

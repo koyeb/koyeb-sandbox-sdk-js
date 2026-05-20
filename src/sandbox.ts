@@ -12,6 +12,8 @@ import { handleServerSentEvents } from './server-sent-event.js';
 import { TypedEventTarget } from './typed-event-target.js';
 import {
   assert,
+  buildConfigFiles,
+  buildEnvVars,
   Duration,
   getEnv,
   isDefined,
@@ -22,13 +24,34 @@ import {
   waitFor,
 } from './utils.js';
 
+/**
+ * Reference to a Koyeb secret by name. A full `koyeb.Secret` object also satisfies this
+ * structurally (its `name` field is read at render time).
+ */
+export type SecretRef = { name?: string };
+
+/**
+ * A value usable in `env` or `config_files`.
+ *
+ * - `string`: passed verbatim. Server-side interpolation (`{{ X }}` and `{{ secret.foo }}`) still applies.
+ * - `SecretRef` (e.g. `{ name: "my-secret" }` or a full `koyeb.Secret`): rendered as
+ *   `"{{ secret.<name> }}"`.
+ */
+export type EnvValue = string | SecretRef;
+
+/**
+ * Config file with custom permissions. `content` accepts the same forms as env values.
+ */
+export type ConfigFile = { content: EnvValue; permissions?: string };
+
 export type CreateSandboxOptions = Partial<{
   image: string;
   name: string;
   wait_ready: boolean;
   instance_type: string;
   exposed_port_protocol: 'http' | 'http2';
-  env: Record<string, string>;
+  env: Record<string, EnvValue>;
+  config_files: Record<string, EnvValue | ConfigFile>;
   region: string;
   api_token: string;
   timeout: number;
@@ -123,11 +146,14 @@ export class Sandbox {
 
     const sandbox_secret = randomString(32);
 
-    definition.env ??= [];
-    definition.env.push({ key: 'SANDBOX_SECRET', value: sandbox_secret });
+    definition.env = [
+      { key: 'SANDBOX_SECRET', value: sandbox_secret },
+      ...buildEnvVars(opts.env),
+    ];
 
-    for (const [key, value] of Object.entries(opts.env ?? {})) {
-      definition.env.push({ key, value });
+    const config_files = buildConfigFiles(opts.config_files);
+    if (config_files.length > 0) {
+      definition.config_files = config_files;
     }
 
     if (opts.idle_timeout > 0) {
@@ -276,6 +302,7 @@ export class Sandbox {
     }
 
     this._domain = await this.get_domain_from_app();
+    this._domain = `https://${this._domain}`;
     return this._domain;
   }
 

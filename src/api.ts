@@ -104,4 +104,13 @@ export class KoyebApi {
     const response = await this.api(koyeb.getDeployment({ ...this.params, path: { id } }));
     return response!.deployment!;
   }
+
+  async createSecret(body: Body<'createSecret'>) {
+    const response = await this.api(koyeb.createSecret({ ...this.params, body }));
+    return response!.secret!;
+  }
+
+  async deleteSecret(id: string) {
+    await this.api(koyeb.deleteSecret({ ...this.params, path: { id } }));
+  }
 }

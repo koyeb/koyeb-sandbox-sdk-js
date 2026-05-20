@@ -302,6 +302,7 @@ export class Sandbox {
     }
 
     this._domain = await this.get_domain_from_app();
+    this._domain = `https://${this._domain}`;
     return this._domain;
   }
 

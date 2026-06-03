@@ -67,6 +67,7 @@ Creates a new sandbox.
 | `timeout`                          | Seconds to wait while checking readiness.                                |
 | `idle_timeout`                     | Seconds before the sandbox scales to zero. Set `0` to disable sleep.     |
 | `enable_tcp_proxy`                 | Enable TCP proxying on port 3031.                                        |
+| `enable_mesh`                      | Enable or disable mesh for this sandbox.                                 |
 | `privileged`                       | Run the sandbox in privileged mode.                                      |
 | `registry_secret`                  | Name of the Koyeb registry secret required to pull private images.       |
 | `delete_after_delay`               | Time to wait before automatically deleting the sandbox after creation.   |

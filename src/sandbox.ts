@@ -44,6 +44,11 @@ export type EnvValue = string | SecretRef;
  */
 export type ConfigFile = { content: EnvValue; permissions?: string };
 
+type DeploymentMesh = 'DEPLOYMENT_MESH_AUTO' | 'DEPLOYMENT_MESH_ENABLED' | 'DEPLOYMENT_MESH_DISABLED';
+type DeploymentDefinitionWithMesh = koyeb.DeploymentDefinition & {
+  mesh?: DeploymentMesh;
+};
+
 export type CreateSandboxOptions = Partial<{
   image: string;
   name: string;
@@ -57,6 +62,7 @@ export type CreateSandboxOptions = Partial<{
   timeout: number;
   idle_timeout: number;
   enable_tcp_proxy: boolean;
+  enable_mesh: boolean;
   privileged: boolean;
   registry_secret?: string;
   delete_after_delay?: Duration;
@@ -119,12 +125,13 @@ export class Sandbox {
     const opts = { ...this.defaultCreateSandboxOptions, ...omitUndefined(options) };
     const token = opts.api_token ?? getEnv('KOYEB_API_TOKEN');
     const region = opts.region ?? getEnv('KOYEB_REGION') ?? 'na';
+    const mesh = this.resolveMesh(opts.enable_mesh);
 
     if (!token) {
       throw new MissingApiTokenError();
     }
 
-    const definition: koyeb.DeploymentDefinition = {
+    const definition: DeploymentDefinitionWithMesh = {
       name: opts.name,
       type: 'SANDBOX',
       docker: {
@@ -142,6 +149,7 @@ export class Sandbox {
         { port: 3030, path: '/koyeb-sandbox/' },
         { port: 3031, path: '/' },
       ],
+      mesh,
     };
 
     const sandbox_secret = randomString(32);
@@ -184,10 +192,22 @@ export class Sandbox {
     return sandbox;
   }
 
+  private static resolveMesh(enable_mesh?: boolean): DeploymentMesh {
+    if (getEnv('KOYEB_K8S_REGION') !== undefined || enable_mesh === false) {
+      return 'DEPLOYMENT_MESH_DISABLED';
+    }
+
+    if (enable_mesh === true) {
+      return 'DEPLOYMENT_MESH_ENABLED';
+    }
+
+    return 'DEPLOYMENT_MESH_AUTO';
+  }
+
   private static async createService(
     token: string,
     opts: CreateSandboxOptions,
-    definition: koyeb.DeploymentDefinition,
+    definition: DeploymentDefinitionWithMesh,
   ) {
     const api = new KoyebApi(token);
 

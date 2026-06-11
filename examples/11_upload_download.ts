@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const sandbox = await Sandbox.create({ name: 'upload-download' });
+console.log(`Sandbox ID: ${sandbox.id}`);
 const fs = sandbox.filesystem;
 
 const tmpName = (suffix: string) => join(tmpdir(), `tmp-${randomBytes(6).toString('hex')}${suffix}`);

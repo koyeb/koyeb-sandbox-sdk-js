@@ -1,6 +1,7 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
 const sandbox = await Sandbox.create({ name: 'expose-port' });
+console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function retry(fn: () => Promise<Response>, retries = 5, delay = 1000): Promise<Response> {
   try {

@@ -1,6 +1,7 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
 const sandbox = await Sandbox.create({ name: 'file-manip' });
+console.log(`Sandbox ID: ${sandbox.id}`);
 const fs = sandbox.filesystem;
 
 async function main() {

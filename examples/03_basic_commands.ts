@@ -1,6 +1,7 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
 const sandbox = await Sandbox.create({ name: 'basic-commands' });
+console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function main() {
   let result = await sandbox.exec("echo 'Sandbox is ready!'");

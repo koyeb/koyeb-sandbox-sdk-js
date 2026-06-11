@@ -1,6 +1,7 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
 const sandbox = await Sandbox.create({ name: 'working-dir' });
+console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function main() {
   await sandbox.exec('mkdir -p /tmp/my_project/src');

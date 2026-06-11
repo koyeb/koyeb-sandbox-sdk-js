@@ -1,6 +1,7 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
 const sandbox = await Sandbox.create({ name: 'streaming' });
+console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function main() {
   const stream1 = sandbox.exec_stream(`python3 -c "

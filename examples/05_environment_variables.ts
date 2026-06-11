@@ -39,6 +39,7 @@ async function main() {
       Y: '{{ X }}',
     },
   });
+  console.log(`Sandbox ID: ${sandbox.id}`);
 
   let result = await sandbox.exec('echo "$SECRET_VAL"');
   assert.equal(result.stdout.trim(), secretValue);

@@ -45,6 +45,7 @@ async function main() {
       '/tmp/restricted.txt': { content: 'only-owner-readable', permissions: '0600' },
     },
   });
+  console.log(`Sandbox ID: ${sandbox.id}`);
 
   // Secret reference in config file
   let result = await sandbox.exec('cat /tmp/secret_config.txt');

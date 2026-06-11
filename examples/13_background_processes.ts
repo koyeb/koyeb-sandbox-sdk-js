@@ -1,6 +1,7 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
 const sandbox = await Sandbox.create({ name: 'background-processes' });
+console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function main() {
   console.log('Launching background processes...');

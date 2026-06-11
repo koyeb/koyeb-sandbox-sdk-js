@@ -47,6 +47,7 @@ console.log('Starting sandbox operations...');
 const sandbox = await timer.time('Sandbox creation', 'Creating sandbox', () =>
   Sandbox.create({ name: 'example-sandbox-timed' }),
 );
+console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function main(args: { long?: boolean }) {
   await timer.time('Health check', 'Checking sandbox health', () => sandbox.is_healthy());

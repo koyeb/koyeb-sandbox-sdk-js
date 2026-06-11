@@ -1,6 +1,7 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
 const sandbox = await Sandbox.create({ name: 'example-sandbox' });
+console.log(`Sandbox ID: ${sandbox.id}`);
 
 export async function main() {
   const result = await sandbox.exec("echo 'Sandbox is ready!'");

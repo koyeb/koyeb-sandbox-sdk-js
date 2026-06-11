@@ -2,6 +2,7 @@ import { Sandbox } from '@koyeb/sandbox-sdk';
 import { Buffer } from 'buffer';
 
 const sandbox = await Sandbox.create({ name: 'binary-files' });
+console.log(`Sandbox ID: ${sandbox.id}`);
 const fs = sandbox.filesystem;
 
 async function main() {

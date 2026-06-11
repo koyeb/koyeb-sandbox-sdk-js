@@ -1,6 +1,6 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
-const sandbox = await Sandbox.create({ name: 'working-dir' });
+const sandbox = await Sandbox.create({ name: 'working-dir', image: 'koyeb/sandbox:slim' });
 console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function main() {

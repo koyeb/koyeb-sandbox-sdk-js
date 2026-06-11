@@ -45,7 +45,7 @@ const timer = new Timer();
 console.log('Starting sandbox operations...');
 
 const sandbox = await timer.time('Sandbox creation', 'Creating sandbox', () =>
-  Sandbox.create({ name: 'example-sandbox-timed' }),
+  Sandbox.create({ name: 'example-sandbox-timed', image: 'koyeb/sandbox:slim' }),
 );
 console.log(`Sandbox ID: ${sandbox.id}`);
 

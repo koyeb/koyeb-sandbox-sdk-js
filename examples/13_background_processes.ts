@@ -1,6 +1,6 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
-const sandbox = await Sandbox.create({ name: 'background-processes' });
+const sandbox = await Sandbox.create({ name: 'background-processes', image: 'koyeb/sandbox:slim' });
 console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function main() {

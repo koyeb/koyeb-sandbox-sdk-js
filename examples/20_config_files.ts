@@ -27,7 +27,7 @@ async function main() {
 
   // Create sandbox with config files referencing the secret and using interpolation
   sandbox = await Sandbox.create({
-    image: 'koyeb/sandbox',
+    image: 'koyeb/sandbox:slim',
     name: `config-files-${suffix}`,
     wait_ready: true,
     api_token: apiToken,

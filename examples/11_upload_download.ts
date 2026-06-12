@@ -4,7 +4,7 @@ import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const sandbox = await Sandbox.create({ name: 'upload-download' });
+const sandbox = await Sandbox.create({ name: 'upload-download', image: 'koyeb/sandbox:slim' });
 console.log(`Sandbox ID: ${sandbox.id}`);
 const fs = sandbox.filesystem;
 

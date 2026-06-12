@@ -27,7 +27,7 @@ async function main() {
 
   // Create sandbox with env vars referencing the secret and using interpolation
   sandbox = await Sandbox.create({
-    image: 'koyeb/sandbox',
+    image: 'koyeb/sandbox:slim',
     name: `env-vars-${suffix}`,
     wait_ready: true,
     api_token: apiToken,

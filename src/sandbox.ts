@@ -14,6 +14,7 @@ import {
   assert,
   buildConfigFiles,
   buildEnvVars,
+  buildNetworkPolicy,
   Duration,
   getEnv,
   isDefined,
@@ -62,6 +63,14 @@ export type CreateSandboxOptions = Partial<{
   delete_after_delay?: Duration;
   delete_after_inactivity_delay?: Duration;
   _experimental_enable_light_sleep: boolean;
+  /** If true, block all outbound network access from the sandbox. Mutually exclusive with `outbound_allowlist`. */
+  block_network: boolean;
+  /**
+   * IPs/CIDRs allowed as outbound destinations; all other outbound traffic is blocked. Bare IPs are
+   * normalized to /32 (IPv4) or /128 (IPv6). An empty list blocks everything. Mutually exclusive with
+   * `block_network`.
+   */
+  outbound_allowlist: string[];
 }>;
 
 export type SandboxExec = TypedEventTarget<{
@@ -124,6 +133,9 @@ export class Sandbox {
       throw new MissingApiTokenError();
     }
 
+    // Validate egress arguments before any API call so invalid input fails fast.
+    const network_policy = buildNetworkPolicy(opts.block_network, opts.outbound_allowlist);
+
     const definition: koyeb.DeploymentDefinition = {
       name: opts.name,
       type: 'SANDBOX',
@@ -154,6 +166,10 @@ export class Sandbox {
     const config_files = buildConfigFiles(opts.config_files);
     if (config_files.length > 0) {
       definition.config_files = config_files;
+    }
+
+    if (network_policy) {
+      definition.network_policy = network_policy;
     }
 
     if (opts.idle_timeout > 0) {
@@ -371,6 +387,33 @@ export class Sandbox {
         delete_after_create: parseDuration(values?.delete_after_delay),
         delete_after_sleep: parseDuration(values?.delete_after_inactivity_delay),
       },
+    });
+  }
+
+  /**
+   * Update the sandbox's egress network policy.
+   *
+   * Warning: applying a new network policy triggers a redeployment of the sandbox service. The
+   * sandbox is restarted and any in-memory or non-persisted state is lost. This method does not
+   * wait for the redeployment to finish.
+   *
+   * With no arguments, the egress policy is reset to the platform default (unrestricted outbound
+   * access). `block_network` and `outbound_allowlist` are mutually exclusive.
+   *
+   * @throws {EgressPolicyError} If both `block_network` and `outbound_allowlist` are passed, or an
+   *   allowlist entry is not a valid IP address or CIDR.
+   */
+  async update_network_policy(values?: { block_network?: boolean; outbound_allowlist?: string[] }): Promise<void> {
+    // Validate before any API call so invalid input fails fast.
+    const network_policy = buildNetworkPolicy(values?.block_network, values?.outbound_allowlist) ?? {
+      egress: { mode: 'EGRESS_POLICY_MODE_DEFAULT' },
+    };
+
+    const service = await this.api.getService(this.service_id);
+    const deployment = await this.api.getDeployment(service.latest_deployment_id!);
+
+    await this.api.updateService(this.service_id, {
+      definition: { ...deployment.definition, network_policy },
     });
   }
 

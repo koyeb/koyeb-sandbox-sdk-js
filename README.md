@@ -72,6 +72,8 @@ Creates a new sandbox.
 | `delete_after_delay`               | Time to wait before automatically deleting the sandbox after creation.   |
 | `delete_after_inactivity_delay`    | Time to wait before automatically deleting the sandbox after inactivity. |
 | `_experimental_enable_light_sleep` | When enabled, uses idle_timeout for light_sleep and sets deep_sleep=3900. |
+| `block_network`                    | Block all outbound network access. Mutually exclusive with `outbound_allowlist`. |
+| `outbound_allowlist`               | IPs/CIDRs allowed as outbound destinations; all other traffic is blocked. Bare IPs are normalized to `/32` (IPv4) or `/128` (IPv6). |
 
 ### `Sandbox.get_from_id(serviceId, apiToken?)`
 
@@ -88,6 +90,7 @@ Load an existing Sandbox from a Koyeb service ID. Useful for long-lived integrat
 | `get_tcp_proxy_info()`                                   | Returns `[host, publicPort]` once the TCP proxy is ready, otherwise `undefined`. |
 | `get_domain()`                                           | Fetches and caches the sandbox domain metadata.                                  |
 | `update_lifecycle()`                                     | Change the auto deletion properties.                                             |
+| `update_network_policy(values?)`                         | Update the egress policy (block, allowlist, or reset). Triggers a redeployment.  |
 | `delete()`                                               | Tears down the underlying service.                                               |
 
 ## Command Execution
@@ -164,6 +167,7 @@ The SDK exports the following error classes for granular handling:
 - `SandboxTimeoutError`
 - `NoSandboxSecretError`
 - `SandboxRequestError`
+- `EgressPolicyError`
 
 ## Contributing
 

@@ -41,3 +41,9 @@ export class SandboxRequestError extends Error {
     super(`Sandbox executor request failed: ${response.status} ${response.statusText}`);
   }
 }
+
+export class EgressPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+  }
+}

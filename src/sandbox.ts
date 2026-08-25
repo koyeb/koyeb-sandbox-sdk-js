@@ -193,8 +193,26 @@ export class Sandbox {
     const service = await this.createService(token, opts, definition);
     const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, sandbox_secret, token);
 
-    if (opts.wait_ready && !(await sandbox.wait_ready(opts.timeout))) {
-      throw new SandboxTimeoutError(sandbox.name, opts.timeout);
+    if (opts.wait_ready) {
+      let ready: boolean;
+      try {
+        ready = await sandbox.wait_ready(opts.timeout);
+      } catch (error) {
+        try {
+          await sandbox.delete();
+        } catch {
+          // best-effort cleanup; suppress delete error to preserve original
+        }
+        throw error;
+      }
+      if (!ready) {
+        try {
+          await sandbox.delete();
+        } catch {
+          // best-effort cleanup; suppress delete error to preserve original
+        }
+        throw new SandboxTimeoutError(sandbox.name, opts.timeout);
+      }
     }
 
     return sandbox;
@@ -211,7 +229,7 @@ export class Sandbox {
 
     const app = await api.createApp({
       name: `sandbox-app-${opts.name}-${Date.now()}`,
-      life_cycle: {},
+      life_cycle: { delete_when_empty: true },
     });
 
     try {

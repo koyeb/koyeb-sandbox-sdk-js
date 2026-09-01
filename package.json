@@ -13,7 +13,9 @@
   "types": "./lib/index.d.ts",
   "sideEffects": false,
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "prepublishOnly": "pnpm build",
+    "release": "pnpm publish --access public"
   },
   "peerDependencies": {
     "@koyeb/api-client-js": "^1.0.0"

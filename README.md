@@ -175,6 +175,39 @@ Install dependencies with `pnpm install` and run `pnpm build` to compile TypeScr
 
 Need help? Reach out on [community.koyeb.com](https://community.koyeb.com).
 
+## Releasing a new version
+
+Releases are published manually to the public npm registry as [`@koyeb/sandbox-sdk`](https://www.npmjs.com/package/@koyeb/sandbox-sdk).
+
+Prerequisites:
+
+- Publish rights on the `@koyeb` npm organization.
+- Log in against the public registry (required if your global npm registry points elsewhere):
+
+  ```bash
+  npm login --registry=https://registry.npmjs.org/
+  npm whoami --registry=https://registry.npmjs.org/
+  ```
+
+Release steps:
+
+```bash
+# 1. Bump the version (creates a commit and a git tag)
+npm version patch   # or: minor / major
+
+# 2. Build and publish (the release script recompiles lib/ before publishing)
+pnpm release
+
+# 3. Push the version commit and tag
+git push --follow-tags
+```
+
+Notes:
+
+- `publishConfig` in `package.json` forces the publish to `registry.npmjs.org` with public access, so it works regardless of your global npm registry.
+- The `release` script runs `pnpm build` explicitly, so the published `lib/` is always fresh even when npm lifecycle scripts are disabled (`ignore-scripts=true`).
+- `pnpm publish` requires a clean git working tree; commit your changes first, or pass `--no-git-checks` to bypass the check.
+
 ## License
 
 This project is licensed under the Apache-2.0 License. See [LICENSE](LICENSE) for details.

@@ -15,7 +15,11 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "pnpm build",
-    "release": "pnpm publish --access public"
+    "release": "pnpm build && pnpm publish"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "peerDependencies": {
     "@koyeb/api-client-js": "^1.0.0"

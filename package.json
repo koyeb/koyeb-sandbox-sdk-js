@@ -1,6 +1,6 @@
 {
   "name": "@koyeb/sandbox-sdk",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Koyeb Sandbox JavaScript SDK",
   "repository": "git://github.com/koyeb/koyeb-sandbox-sdk-js.git",
   "author": "Koyeb <support@koyeb.com>",
@@ -13,7 +13,13 @@
   "types": "./lib/index.d.ts",
   "sideEffects": false,
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "prepublishOnly": "pnpm build",
+    "release": "pnpm build && pnpm publish"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "peerDependencies": {
     "@koyeb/api-client-js": "^1.0.0"

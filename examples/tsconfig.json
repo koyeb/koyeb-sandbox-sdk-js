@@ -2,9 +2,8 @@
   "extends": "../tsconfig.json",
   "include": ["*"],
   "compilerOptions": {
-    "noEmit": true,
-    "paths": {
-      "@koyeb/sandbox-sdk": ["../src/index.ts"]
-    }
+    "noEmit": false,
+    "outDir": "../.examples-build",
+    "rootDir": "."
   }
 }

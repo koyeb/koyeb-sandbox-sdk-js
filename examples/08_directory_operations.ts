@@ -1,29 +1,19 @@
-import { Sandbox } from '@koyeb/sandbox-sdk';
+import assert from 'node:assert/strict';
 
-const sandbox = await Sandbox.create({ name: 'directory-ops', image: 'koyeb/sandbox:slim' });
-console.log(`Sandbox ID: ${sandbox.id}`);
-const fs = sandbox.filesystem;
+import { runExample, withSandbox } from './_helpers.js';
 
-async function main() {
-  await fs.mkdir('/tmp/my_project');
-  await fs.mkdir('/tmp/my_project/src/utils', true);
+await runExample('directory operations', async () => {
+  await withSandbox('directory-operations', {}, async (sandbox) => {
+    const fs = sandbox.filesystem;
+    await fs.mkdir('/tmp/project/src/utils', true);
+    await fs.write_file('/tmp/project/src/main.py', "print('Hello')");
+    await fs.write_file('/tmp/project/README.md', '# Project');
 
-  const contents = await fs.list_dir('/tmp/my_project');
-  console.log(`Contents: ${contents.join(', ')}`);
-
-  await fs.mkdir('/tmp/my_project/src', true);
-  await fs.mkdir('/tmp/my_project/tests', true);
-  await fs.write_file('/tmp/my_project/src/main.py', "print('Hello')");
-  await fs.write_file('/tmp/my_project/README.md', '# My Project');
-
-  const exists = await fs.exists('/tmp/my_project');
-  const isDir = await fs.is_dir('/tmp/my_project');
-  const isFile = await fs.is_file('/tmp/my_project/src/main.py');
-  console.log(`Exists: ${exists}, Is dir: ${isDir}, Is file: ${isFile}`);
-}
-
-async function cleanup() {
-  await sandbox.delete();
-}
-
-main().catch(console.error).finally(cleanup);
+    const contents = await fs.list_dir('/tmp/project');
+    assert.ok(contents.includes('src'));
+    assert.ok(contents.includes('README.md'));
+    assert.equal(await fs.exists('/tmp/project'), true);
+    assert.equal(await fs.is_dir('/tmp/project'), true);
+    assert.equal(await fs.is_file('/tmp/project/src/main.py'), true);
+  });
+});

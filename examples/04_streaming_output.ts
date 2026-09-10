@@ -1,41 +1,31 @@
-import { Sandbox } from '@koyeb/sandbox-sdk';
+import assert from 'node:assert/strict';
 
-const sandbox = await Sandbox.create({ name: 'streaming', image: 'koyeb/sandbox:slim' });
-console.log(`Sandbox ID: ${sandbox.id}`);
+import type { SandboxExec } from '@koyeb/sandbox-sdk';
 
-async function main() {
-  const stream1 = sandbox.exec_stream(`python3 -c "
-import time
-for i in range(5):
-    print(f'Line {i+1}')
-    time.sleep(0.5)
-"`);
+import { runExample, withSandbox } from './_helpers.js';
 
-  const code = await new Promise<number>((resolve) => {
-    stream1.addEventListener('stdout', ({ data }) => process.stdout.write(`${data.data} `));
-    stream1.addEventListener('stderr', ({ data }) => process.stdout.write(`ERR: ${data.data}`));
-    stream1.addEventListener('exit', ({ data }) => resolve(data.code));
-  });
-
-  console.log(`\nExit code: ${code}`);
-
-  await sandbox.filesystem.write_file(
-    '/tmp/counter.py',
-    "#!/usr/bin/env python3\nimport time\nfor i in range(1, 6):\n    print(f'Count: {i}')\n    time.sleep(0.3)\nprint('Done!')\n",
-  );
-
-  await sandbox.exec('chmod +x /tmp/counter.py');
-
-  const stream2 = sandbox.exec_stream('/tmp/counter.py');
-
-  await new Promise<void>((resolve) => {
-    stream2.addEventListener('stdout', ({ data }) => console.log(data.data));
-    stream2.addEventListener('exit', () => resolve());
+async function collect(stream: SandboxExec): Promise<{ stdout: string; stderr: string; code: number }> {
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let code = -1;
+    stream.addEventListener('stdout', ({ data }) => (stdout += data.data));
+    stream.addEventListener('stderr', ({ data }) => (stderr += data.data));
+    stream.addEventListener('exit', ({ data }) => (code = data.code));
+    stream.addEventListener('error', ({ data }) => reject(data));
+    stream.addEventListener('end', () => resolve({ stdout, stderr, code }));
   });
 }
 
-async function cleanup() {
-  await sandbox.delete();
-}
+await runExample('streaming output', async () => {
+  await withSandbox('streaming-output', {}, async (sandbox) => {
+    const success = await collect(sandbox.exec_stream("printf 'one\\ntwo\\n'"));
+    assert.equal(success.code, 0);
+    assert.match(success.stdout, /one/);
+    assert.match(success.stdout, /two/);
 
-main().catch(console.error).finally(cleanup);
+    const failure = await collect(sandbox.exec_stream("sh -c 'echo failed >&2; exit 7'"));
+    assert.equal(failure.code, 7);
+    assert.match(failure.stderr, /failed/);
+  });
+});

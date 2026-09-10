@@ -1,33 +1,19 @@
-import { Sandbox } from '@koyeb/sandbox-sdk';
+import assert from 'node:assert/strict';
 
-const sandbox = await Sandbox.create({ name: 'file-manip', image: 'koyeb/sandbox:slim' });
-console.log(`Sandbox ID: ${sandbox.id}`);
-const fs = sandbox.filesystem;
+import { runExample, withSandbox } from './_helpers.js';
 
-async function main() {
-  await fs.write_file('/tmp/file1.txt', 'Content of file 1');
-  await fs.write_file('/tmp/file2.txt', 'Content of file 2');
-  await fs.mkdir('/tmp/test_dir');
+await runExample('file manipulation', async () => {
+  await withSandbox('file-manipulation', {}, async (sandbox) => {
+    const fs = sandbox.filesystem;
+    await fs.write_file('/tmp/file.txt', 'content');
+    await fs.rename_file('/tmp/file.txt', '/tmp/renamed file.txt');
+    assert.equal(await fs.exists('/tmp/renamed file.txt'), true);
+    assert.equal((await fs.read_file('/tmp/renamed file.txt')).content, 'content');
+    await fs.rm('/tmp/renamed file.txt');
+    assert.equal(await fs.exists('/tmp/renamed file.txt'), false);
 
-  await fs.rename_file('/tmp/file1.txt', '/tmp/renamed_file.txt');
-  console.log(`Renamed: ${await fs.exists('/tmp/renamed_file.txt')}`);
-
-  await fs.rename_file('/tmp/file2.txt', '/tmp/test_dir/moved_file.txt');
-  console.log(`Moved: ${await fs.exists('/tmp/test_dir/moved_file.txt')}`);
-
-  const original_content = await fs.read_file('/tmp/renamed_file.txt');
-  await fs.write_file('/tmp/test_dir/copied_file.txt', original_content.content);
-  console.log(`Copied: ${await fs.exists('/tmp/test_dir/copied_file.txt')}`);
-
-  await fs.rm('/tmp/renamed_file.txt');
-  console.log(`Deleted: ${!(await fs.exists('/tmp/renamed_file.txt'))}`);
-
-  await fs.rm('/tmp/test_dir', true);
-  console.log(`Directory deleted: ${!(await fs.exists('/tmp/test_dir'))}`);
-}
-
-async function cleanup() {
-  await sandbox.delete();
-}
-
-main().catch(console.error).finally(cleanup);
+    await fs.mkdir('/tmp/test dir/child', true);
+    await fs.rm('/tmp/test dir', true);
+    assert.equal(await fs.exists('/tmp/test dir'), false);
+  });
+});

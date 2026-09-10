@@ -1,15 +1,13 @@
-import { Sandbox } from '@koyeb/sandbox-sdk';
+import assert from 'node:assert/strict';
 
-const sandbox = await Sandbox.create({ name: 'example-sandbox', image: 'koyeb/sandbox:slim' });
-console.log(`Sandbox ID: ${sandbox.id}`);
+import { assertCommand, runExample, withSandbox } from './_helpers.js';
 
-export async function main() {
-  const result = await sandbox.exec("echo 'Sandbox is ready!'");
-  console.log(result.stdout);
-}
-
-async function cleanup() {
-  await sandbox.delete();
-}
-
-main().catch(console.error).finally(cleanup);
+await runExample('create sandbox', async () => {
+  await withSandbox('create-sandbox', {}, async (sandbox) => {
+    assert.ok(sandbox.id);
+    assert.equal(await sandbox.is_healthy(), true);
+    const result = await sandbox.exec("echo 'Sandbox is ready!'");
+    assertCommand(result);
+    assert.equal(result.stdout.trim(), 'Sandbox is ready!');
+  });
+});

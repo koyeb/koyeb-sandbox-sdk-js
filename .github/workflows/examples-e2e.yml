@@ -1,0 +1,46 @@
+name: Sandbox examples E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * 1'
+
+concurrency:
+  group: sandbox-examples-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: core
+            flows: 01_,02_,03_,04_,05_,06_,07_,08_,09_,10_,11_,12_,13_,14_,15_
+          - name: lifecycle-and-network
+            flows: 16_,17_,18_,19_,20_,21_,22_
+          - name: snapshots
+            flows: 23_,24_,25_,26_
+    name: ${{ matrix.name }}
+    env:
+      KOYEB_API_TOKEN: ${{ secrets.KOYEB_API_TOKEN }}
+      KOYEB_API_HOST: ${{ vars.KOYEB_API_HOST || 'https://app.koyeb.com' }}
+      KOYEB_PROJECT_ID: ${{ vars.KOYEB_PROJECT_ID }}
+      KOYEB_REGION: ${{ vars.KOYEB_REGION || 'na' }}
+      KOYEB_AUTO_DELETE_DELAY: '60'
+      KOYEB_SNAPSHOT_BENCHMARK_SIZE_MB: '1'
+      KOYEB_SNAPSHOT_BENCHMARK_BOOTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm examples:e2e -- --flows "${{ matrix.flows }}" --timeout 1800

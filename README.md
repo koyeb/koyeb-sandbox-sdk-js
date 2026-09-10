@@ -83,7 +83,7 @@ Load an existing Sandbox from a Koyeb service ID. Useful for long-lived integrat
 
 | Method                                                   | Description                                                                      |
 | -------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `wait_ready(timeout?, pollInterval?, signal?)`           | Polls health until success or timeout. Resolves to `true` on success.            |
+| `wait_ready(timeout?, pollInterval?, signal?)`           | Checks deployment and executor health. Resolves to `true` on success.            |
 | `wait_tcp_proxy_ready(timeout?, pollInterval?, signal?)` | Polls until TCP proxy information becomes available.                             |
 | `is_healthy()`                                           | Performs a `/health` check against the sandbox URL.                              |
 | `get_sandbox_url()`                                      | Returns the HTTPS URL (`https://<domain>/koyeb-sandbox`).                        |
@@ -97,8 +97,8 @@ Load an existing Sandbox from a Koyeb service ID. Useful for long-lived integrat
 
 | Method                       | Description                                                                                            |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `exec(cmd, options?)`        | Runs a command and resolves with `{ stdout, stderr, code }`. Supports `cwd`, `env`, and `AbortSignal`. |
-| `exec_stream(cmd, options?)` | Streams command output using Server-Sent Events. Emits `stdout`, `stderr`, and `end`.                  |
+| `exec(cmd, options?)`        | Runs a command. Supports `cwd`, `env`, `timeout`, and `AbortSignal`.                                    |
+| `exec_stream(cmd, options?)` | Streams command output. Emits `stdout`, `stderr`, `exit`, `end`, and `error`.                           |
 
 ### Streaming Example
 
@@ -162,12 +162,25 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 
 The SDK exports the following error classes for granular handling:
 
+- `SandboxError`
 - `MissingApiTokenError`
 - `InvalidPortError`
 - `SandboxTimeoutError`
+- `SandboxDeploymentError`
+- `SandboxConnectionError`
+- `SandboxServiceError`
+- `SandboxFilesystemError`
+- `SandboxFileNotFoundError`
+- `SandboxFileExistsError`
 - `NoSandboxSecretError`
 - `SandboxRequestError`
 - `EgressPolicyError`
+
+Executor requests use a 30-second timeout by default.
+
+The SDK retries HTTP `503` responses three times. The delays are one, two, and four seconds.
+
+Health checks and command streams do not use request retries.
 
 ## Contributing
 

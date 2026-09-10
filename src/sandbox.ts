@@ -1,10 +1,24 @@
 import { koyeb, KoyebApi } from './api.js';
-import { DEFAULT_IDLE_TIMEOUT, DEFAULT_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT, PORT_MAX, PORT_MIN } from './constants.js';
+import {
+  DEFAULT_CREATE_TIMEOUT,
+  DEFAULT_HTTP_TIMEOUT,
+  DEFAULT_IDLE_TIMEOUT,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_POLL_INTERVAL,
+  DEFAULT_RETRY_BACKOFF,
+  DEFAULT_WAIT_TIMEOUT,
+  PORT_MAX,
+  PORT_MIN,
+} from './constants.js';
 import {
   InvalidPortError,
   MissingApiTokenError,
   NoSandboxSecretError,
+  SandboxConnectionError,
+  SandboxDeploymentError,
+  SandboxError,
   SandboxRequestError,
+  SandboxServiceError,
   SandboxTimeoutError,
 } from './errors.js';
 import { SandboxFilesystem } from './sandbox-filesystem.js';
@@ -22,6 +36,7 @@ import {
   omitUndefined,
   parseDuration,
   randomString,
+  wait,
   waitFor,
 } from './utils.js';
 
@@ -78,6 +93,7 @@ export type SandboxExec = TypedEventTarget<{
   stderr: MessageEvent<{ stream: 'stderr'; data: string }>;
   exit: MessageEvent<{ code: number; error: boolean }>;
   end: Event;
+  error: MessageEvent<Error>;
 }>;
 
 export type SandboxProcess = {
@@ -95,10 +111,17 @@ type ConnectionInfo = {
   secret: string;
 };
 
+type ExecutorRequestOptions = {
+  timeout?: number;
+  maxRetries?: number;
+  initialBackoff?: number;
+};
+
 export class Sandbox {
   private readonly api: KoyebApi;
   private _conn_info?: ConnectionInfo;
   private _domain?: string;
+  private _deployment_id?: string;
 
   constructor(
     public readonly app_id: string,
@@ -120,7 +143,7 @@ export class Sandbox {
     wait_ready: true,
     instance_type: 'micro',
     exposed_port_protocol: 'http',
-    timeout: DEFAULT_WAIT_TIMEOUT,
+    timeout: DEFAULT_CREATE_TIMEOUT,
     idle_timeout: DEFAULT_IDLE_TIMEOUT,
   } satisfies CreateSandboxOptions;
 
@@ -158,10 +181,7 @@ export class Sandbox {
 
     const sandbox_secret = randomString(32);
 
-    definition.env = [
-      { key: 'SANDBOX_SECRET', value: sandbox_secret },
-      ...buildEnvVars(opts.env),
-    ];
+    definition.env = [{ key: 'SANDBOX_SECRET', value: sandbox_secret }, ...buildEnvVars(opts.env)];
 
     const config_files = buildConfigFiles(opts.config_files);
     if (config_files.length > 0) {
@@ -256,13 +276,29 @@ export class Sandbox {
 
     const api = new KoyebApi(token);
     const service = await api.getService(serviceId);
-    const deployment = await api.getDeployment(service.latest_deployment_id!);
+    const deploymentId = service.active_deployment_id ?? service.latest_deployment_id;
+
+    assert(deploymentId, new SandboxError(`Sandbox '${serviceId}' has no deployment`));
+
+    const deployment = await api.getDeployment(deploymentId);
 
     const secret = deployment.definition?.env?.find(({ key }) => key === 'SANDBOX_SECRET');
 
     assert(secret?.value, new NoSandboxSecretError());
 
-    return new Sandbox(service.app_id!, service.id!, service.name!, secret.value, token);
+    const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, secret.value, token);
+    sandbox._deployment_id = deploymentId;
+
+    const metadata = deployment.metadata?.sandbox;
+    if (metadata?.public_url && metadata.routing_key) {
+      sandbox._conn_info = {
+        public_url: `${metadata.public_url}/koyeb-sandbox`,
+        routing_key: metadata.routing_key,
+        secret: secret.value,
+      };
+    }
+
+    return sandbox;
   }
 
   async wait_ready(
@@ -270,7 +306,20 @@ export class Sandbox {
     pollInterval = DEFAULT_POLL_INTERVAL,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    return waitFor(() => this.is_healthy(), timeout, pollInterval, signal);
+    let deploymentHealthy = false;
+
+    return waitFor(
+      async () => {
+        if (!deploymentHealthy) {
+          deploymentHealthy = await this.is_deployment_healthy();
+        }
+
+        return deploymentHealthy && this.check_executor_health(signal);
+      },
+      timeout,
+      pollInterval,
+      signal,
+    );
   }
 
   async wait_tcp_proxy_ready(
@@ -282,40 +331,110 @@ export class Sandbox {
   }
 
   async is_healthy(): Promise<boolean> {
-    const conn = await this.get_conn_info();
-    const headers: Record<string, string> = { Authorization: `Bearer ${conn.secret}` };
+    return (await this.is_deployment_healthy()) && this.check_executor_health();
+  }
 
-    if (conn.routing_key) {
-      headers['X-Routing-Key'] = conn.routing_key;
+  private async resolve_deployment_id(): Promise<string | undefined> {
+    if (this._deployment_id) {
+      return this._deployment_id;
     }
 
-    const response = await fetch(`${conn.public_url}/health`, { headers });
+    const service = await this.api.getService(this.service_id);
+    this._deployment_id = service.active_deployment_id ?? service.latest_deployment_id;
+    return this._deployment_id;
+  }
 
-    return response.ok;
+  private async is_deployment_healthy(): Promise<boolean> {
+    try {
+      const deploymentId = await this.resolve_deployment_id();
+      if (!deploymentId) {
+        return false;
+      }
+
+      const deployment = await this.api.getDeployment(deploymentId);
+      if (deployment.status === 'ERROR' || deployment.status === 'ERRORING') {
+        throw new SandboxDeploymentError(
+          `Sandbox '${this.name}' deployment reached status ${deployment.status}. The sandbox will not become ready.`,
+        );
+      }
+
+      if (deployment.status !== 'HEALTHY') {
+        return false;
+      }
+
+      const metadata = deployment.metadata?.sandbox;
+      if (!this._conn_info && metadata?.public_url && metadata.routing_key) {
+        this._conn_info = {
+          public_url: `${metadata.public_url}/koyeb-sandbox`,
+          routing_key: metadata.routing_key,
+          secret: this.sandbox_secret,
+        };
+      }
+
+      return true;
+    } catch (error) {
+      if (error instanceof SandboxDeploymentError) {
+        throw error;
+      }
+
+      return false;
+    }
+  }
+
+  private async check_executor_health(signal?: AbortSignal): Promise<boolean> {
+    try {
+      const body = await this.performRequest(
+        '/health',
+        { method: 'GET', signal },
+        undefined,
+        { timeout: 5, maxRetries: 0 },
+        async (response) => {
+          if (!response.ok) {
+            return undefined;
+          }
+
+          return response.json().catch(() => undefined);
+        },
+      );
+
+      if (body && typeof body === 'object' && 'status' in body && typeof body.status === 'string') {
+        return ['ok', 'healthy', 'ready'].includes(body.status.toLowerCase());
+      }
+
+      return isDefined(body);
+    } catch {
+      return false;
+    }
   }
 
   async get_tcp_proxy_info(): Promise<[host: string, public_port: number] | undefined> {
-    const service = await this.api.getService(this.service_id);
+    try {
+      const service = await this.api.getService(this.service_id);
 
-    if (isUndefined(service.active_deployment_id)) {
+      if (isUndefined(service.active_deployment_id)) {
+        return;
+      }
+
+      const deployment = await this.api.getDeployment(service.active_deployment_id);
+      const proxy_port = deployment.metadata?.proxy_ports?.find(({ port }) => port === 3031);
+
+      if (!proxy_port) {
+        return;
+      }
+
+      return [proxy_port.host!, proxy_port.public_port!];
+    } catch {
       return;
     }
-
-    const deployment = await this.api.getDeployment(service.active_deployment_id);
-    const proxy_port = deployment.metadata?.proxy_ports?.find(({ port }) => port === 3031);
-
-    if (!proxy_port) {
-      return;
-    }
-
-    return [proxy_port.host!, proxy_port.public_port!];
   }
 
   private async get_domain_from_app(): Promise<string> {
     const app = await this.api.getApp(this.app_id);
     const domain = app.domains?.[0];
 
-    assert(domain?.name);
+    if (!domain?.name) {
+      throw new SandboxError('Sandbox URL is not available (the sandbox may no longer exist)');
+    }
 
     return domain.name;
   }
@@ -342,13 +461,11 @@ export class Sandbox {
 
   private async get_metadata_connection_info(): Promise<{ public_url: string; routing_key: string } | undefined> {
     try {
-      const service = await this.api.getService(this.service_id);
-      const deploymentId = service.active_deployment_id || service.latest_deployment_id;
+      const deploymentId = await this.resolve_deployment_id();
       if (!deploymentId) return;
 
       const deployment = await this.api.getDeployment(deploymentId);
-      const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)
-        ?.sandbox;
+      const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)?.sandbox;
 
       if (sandbox?.public_url && sandbox?.routing_key) {
         return { public_url: sandbox.public_url, routing_key: sandbox.routing_key };
@@ -398,13 +515,19 @@ export class Sandbox {
   }): Promise<void> {
     const service = await this.api.getService(this.service_id);
     const deployment = await this.api.getDeployment(service.latest_deployment_id!);
+    const life_cycle = { ...service.life_cycle };
+
+    if (isDefined(values?.delete_after_delay)) {
+      life_cycle.delete_after_create = parseDuration(values.delete_after_delay);
+    }
+
+    if (isDefined(values?.delete_after_inactivity_delay)) {
+      life_cycle.delete_after_sleep = parseDuration(values.delete_after_inactivity_delay);
+    }
 
     await this.api.updateService(this.service_id, {
       definition: deployment.definition,
-      life_cycle: {
-        delete_after_create: parseDuration(values?.delete_after_delay),
-        delete_after_sleep: parseDuration(values?.delete_after_inactivity_delay),
-      },
+      life_cycle,
     });
   }
 
@@ -430,44 +553,165 @@ export class Sandbox {
     const service = await this.api.getService(this.service_id);
     const deployment = await this.api.getDeployment(service.latest_deployment_id!);
 
-    await this.api.updateService(this.service_id, {
+    const updatedService = await this.api.updateService(this.service_id, {
       definition: { ...deployment.definition, network_policy },
     });
+
+    let deploymentId = updatedService?.latest_deployment_id;
+    if (!deploymentId) {
+      try {
+        deploymentId = (await this.api.getService(this.service_id)).latest_deployment_id;
+      } catch {
+        deploymentId = undefined;
+      }
+    }
+
+    this.reset_connection_state(deploymentId);
+  }
+
+  private reset_connection_state(deploymentId?: string): void {
+    this._deployment_id = deploymentId;
+    this._conn_info = undefined;
+    this._domain = undefined;
   }
 
   async delete(): Promise<void> {
     await this.api.deleteApp(this.app_id);
   }
 
-  async fetch(path: string, init: RequestInit, requestBody?: unknown) {
-    const conn = await this.get_conn_info();
-    init.headers = new Headers(init.headers);
+  private async performRequest<T>(
+    path: string,
+    init: RequestInit,
+    requestBody: unknown,
+    options: ExecutorRequestOptions,
+    handleResponse: (response: Response) => Promise<T>,
+  ): Promise<T> {
+    const timeout = options.timeout ?? DEFAULT_HTTP_TIMEOUT;
+    const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    let backoff = options.initialBackoff ?? DEFAULT_RETRY_BACKOFF;
 
-    init.headers.set('Authorization', `Bearer ${conn.secret}`);
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const conn = await this.get_conn_info();
+      const headers = new Headers(init.headers);
+      const controller = new AbortController();
+      const sourceSignal = init.signal;
+      const timeoutError = SandboxTimeoutError.forRequest(timeout);
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-    if (conn.routing_key) {
-      init.headers.set('X-Routing-Key', conn.routing_key);
+      const abortFromSource = () => controller.abort(sourceSignal?.reason);
+      if (sourceSignal?.aborted) {
+        abortFromSource();
+      } else {
+        sourceSignal?.addEventListener('abort', abortFromSource, { once: true });
+      }
+
+      if (timeout > 0) {
+        timeoutId = setTimeout(() => controller.abort(timeoutError), timeout * 1_000);
+      }
+
+      headers.set('Authorization', `Bearer ${conn.secret}`);
+      if (conn.routing_key) {
+        headers.set('X-Routing-Key', conn.routing_key);
+      }
+
+      const requestInit: RequestInit = { ...init, headers, signal: controller.signal };
+      if (isDefined(requestBody)) {
+        headers.set('Content-Type', 'application/json');
+        requestInit.body = JSON.stringify(requestBody);
+      }
+
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = undefined;
+        }
+        sourceSignal?.removeEventListener('abort', abortFromSource);
+      };
+
+      try {
+        const response = await globalThis.fetch(`${conn.public_url}${path}`, requestInit);
+
+        if (response.status === 503 && attempt < maxRetries) {
+          await response.body?.cancel();
+          cleanup();
+
+          if (!(await wait(backoff * 1_000, sourceSignal ?? undefined))) {
+            throw sourceSignal?.reason ?? new DOMException('The operation was aborted', 'AbortError');
+          }
+
+          backoff *= 2;
+          continue;
+        }
+
+        return await handleResponse(response);
+      } catch (error) {
+        if (controller.signal.reason === timeoutError) {
+          throw timeoutError;
+        }
+
+        if (sourceSignal?.aborted) {
+          throw sourceSignal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+        }
+
+        if (error instanceof SandboxError || error instanceof SyntaxError) {
+          throw error;
+        }
+
+        throw new SandboxConnectionError(`Connection to sandbox lost: ${String(error)}`, { cause: error });
+      } finally {
+        cleanup();
+      }
     }
 
-    if (isDefined(requestBody)) {
-      init.headers.set('Content-Type', 'application/json');
-      init.body = JSON.stringify(requestBody);
-    }
-
-    return fetch(`${conn.public_url}${path}`, init);
+    throw new SandboxError('Sandbox request failed without a response');
   }
 
-  async request(path: string, init: RequestInit, requestBody?: unknown) {
-    const response = await this.fetch(path, init, requestBody);
-
-    const contentType = response.headers.get('Content-Type');
-    const responseBody = contentType?.startsWith('application/json') ? await response.json() : await response.text();
-
-    if (!response.ok) {
-      throw new SandboxRequestError(response, responseBody);
+  private async readResponseBody(response: Response): Promise<unknown> {
+    if (response.status === 204) {
+      return undefined;
     }
 
-    return responseBody;
+    const contentType = response.headers.get('Content-Type');
+    return contentType?.startsWith('application/json') ? response.json() : response.text();
+  }
+
+  private responseError(response: Response, responseBody: unknown): SandboxRequestError {
+    if (response.status >= 500) {
+      return new SandboxServiceError(response, responseBody);
+    }
+
+    return new SandboxRequestError(response, responseBody);
+  }
+
+  private assertExecutorSuccess(response: unknown, operation: string): void {
+    if (!response || typeof response !== 'object') {
+      return;
+    }
+
+    const result = response as { error?: unknown; success?: unknown };
+    if (result.error || result.success === false) {
+      throw new SandboxError(`Failed to ${operation}: ${String(result.error ?? 'Unknown error')}`);
+    }
+  }
+
+  async fetch(path: string, init: RequestInit, requestBody?: unknown, options: ExecutorRequestOptions = {}) {
+    return this.performRequest(path, init, requestBody, options, async (response) => response);
+  }
+
+  async request(
+    path: string,
+    init: RequestInit,
+    requestBody?: unknown,
+    options: ExecutorRequestOptions = {},
+  ): Promise<any> {
+    return this.performRequest(path, init, requestBody, options, async (response) => {
+      const responseBody = await this.readResponseBody(response);
+      if (!response.ok) {
+        throw this.responseError(response, responseBody);
+      }
+
+      return responseBody;
+    });
   }
 
   get filesystem() {
@@ -476,21 +720,47 @@ export class Sandbox {
 
   async exec(
     cmd: string,
-    { cwd, env, signal }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal } = {},
+    {
+      cwd,
+      env,
+      signal,
+      timeout = DEFAULT_HTTP_TIMEOUT,
+    }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal; timeout?: number } = {},
   ): Promise<{ stdout: string; stderr: string; code: number }> {
-    return this.request('/run', { method: 'POST', signal }, { cmd, cwd, env });
+    return this.request('/run', { method: 'POST', signal }, { cmd, cwd, env }, { timeout });
   }
 
   exec_stream(
     cmd: string,
-    { cwd, env, signal }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal } = {},
+    {
+      cwd,
+      env,
+      signal,
+      timeout = DEFAULT_HTTP_TIMEOUT,
+    }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal; timeout?: number } = {},
   ): SandboxExec {
     const emitter = new EventTarget();
 
-    this.fetch('/run_streaming', { method: 'POST', signal }, { cmd, cwd, env })
-      .then((response) => response.body)
-      .then((body) => body && handleServerSentEvents(emitter, body))
-      .catch((error) => emitter.dispatchEvent(new MessageEvent('error', { data: error })));
+    this.performRequest(
+      '/run_streaming',
+      { method: 'POST', signal },
+      { cmd, cwd, env },
+      { timeout, maxRetries: 0 },
+      async (response) => {
+        if (!response.ok) {
+          throw this.responseError(response, await this.readResponseBody(response));
+        }
+
+        if (!response.body) {
+          throw new SandboxError('Sandbox executor returned an empty command stream');
+        }
+
+        await handleServerSentEvents(emitter, response.body);
+      },
+    ).catch((error) => {
+      const streamError = error instanceof Error ? error : new SandboxError(String(error));
+      emitter.dispatchEvent(new MessageEvent('error', { data: streamError }));
+    });
 
     return emitter;
   }
@@ -499,7 +769,8 @@ export class Sandbox {
     assert(port >= PORT_MIN && port <= PORT_MAX, new InvalidPortError(port));
 
     await this.unexpose_port();
-    await this.request('/bind_port', { method: 'POST' }, { port: String(port) });
+    const response = await this.request('/bind_port', { method: 'POST' }, { port: String(port) });
+    this.assertExecutorSuccess(response, `expose port ${port}`);
 
     const domain = await this.get_domain();
 
@@ -514,21 +785,32 @@ export class Sandbox {
       assert(port >= PORT_MIN && port <= PORT_MAX, new InvalidPortError(port));
     }
 
-    await this.request('/unbind_port', { method: 'POST' }, { port: isDefined(port) ? String(port) : undefined });
+    const response = await this.request(
+      '/unbind_port',
+      { method: 'POST' },
+      { port: isDefined(port) ? String(port) : undefined },
+    );
+    this.assertExecutorSuccess(response, 'unexpose port');
   }
 
   async launch_process(cmd: string, options?: { cwd?: string; env?: Record<string, string> }): Promise<string> {
     const response = await this.request('/start_process', { method: 'POST' }, { cmd, ...options });
+    this.assertExecutorSuccess(response, 'launch process');
+    if (!response.id) {
+      throw new SandboxError('Failed to launch process: no process ID returned');
+    }
     return response.id;
   }
 
   async kill_process(processId: string): Promise<void> {
-    await this.request(`/kill_process`, { method: 'POST' }, { id: processId });
+    const response = await this.request(`/kill_process`, { method: 'POST' }, { id: processId });
+    this.assertExecutorSuccess(response, `kill process ${processId}`);
   }
 
   async list_processes(): Promise<SandboxProcess[]> {
     const response = await this.request('/list_processes', { method: 'GET' });
-    return response.processes;
+    this.assertExecutorSuccess(response, 'list processes');
+    return response.processes ?? [];
   }
 
   async kill_all_processes(): Promise<number> {

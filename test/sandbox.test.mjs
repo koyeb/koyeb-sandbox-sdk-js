@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { Sandbox, SandboxDeploymentError, SandboxServiceError, SandboxTimeoutError } from '../lib/index.js';
+import {
+  KoyebApi,
+  Sandbox,
+  SandboxDeploymentError,
+  SandboxServiceError,
+  SandboxTimeoutError,
+  Snapshot,
+  SnapshotStatus,
+  SnapshotType,
+} from '../lib/index.js';
 
 function createSandbox() {
   const sandbox = new Sandbox('app-id', 'service-id', 'sandbox', 'secret', 'token');
@@ -198,4 +207,105 @@ test('process helpers reject executor error bodies', async () => {
   sandbox.request = async () => ({ success: false, error: 'cannot start process' });
 
   await assert.rejects(sandbox.launch_process('sleep 10'), /cannot start process/);
+});
+
+test('create supports an existing app and container overrides', async (t) => {
+  const createServiceCalls = [];
+  let deletedService;
+
+  t.mock.method(KoyebApi.prototype, 'createService', async (body, query) => {
+    createServiceCalls.push({ body, query });
+    return { app_id: body.app_id, id: 'service-id', name: body.name };
+  });
+  t.mock.method(KoyebApi.prototype, 'createApp', async () => {
+    throw new Error('createApp must not run');
+  });
+  t.mock.method(KoyebApi.prototype, 'deleteService', async (id) => {
+    deletedService = id;
+  });
+
+  const sandbox = await Sandbox.create({
+    api_token: 'token',
+    app_id: 'existing-app',
+    project_id: 'project-id',
+    name: 'custom-runtime',
+    wait_ready: false,
+    enable_mesh: true,
+    entrypoint: ['node'],
+    command: 'server.js',
+    args: ['--port', '3000'],
+  });
+
+  assert.equal(createServiceCalls.length, 2);
+  assert.deepEqual(createServiceCalls[0].query, { dry_run: true });
+  assert.deepEqual(createServiceCalls[1].body.definition.docker.entrypoint, ['node']);
+  assert.equal(createServiceCalls[1].body.definition.docker.command, 'server.js');
+  assert.deepEqual(createServiceCalls[1].body.definition.docker.args, ['--port', '3000']);
+  assert.equal(createServiceCalls[1].body.definition.mesh, 'DEPLOYMENT_MESH_ENABLED');
+  assert.equal(createServiceCalls[1].body.project_id, 'project-id');
+
+  await sandbox.delete();
+  assert.equal(deletedService, 'service-id');
+});
+
+test('create restores a full snapshot without a deployment definition', async (t) => {
+  let createServiceBody;
+  let createAppBody;
+
+  t.mock.method(KoyebApi.prototype, 'createApp', async (body) => {
+    createAppBody = body;
+    return { id: 'app-id' };
+  });
+  t.mock.method(KoyebApi.prototype, 'createService', async (body) => {
+    createServiceBody = body;
+    return { app_id: body.app_id, id: 'service-id', name: body.name };
+  });
+
+  const snapshot = Snapshot.fromApi(
+    {
+      id: 'snapshot-id',
+      project_id: 'project-id',
+      type: 'INSTANCE_SNAPSHOT_TYPE_FULL',
+    },
+    'token',
+    'snapshot-secret',
+  );
+  await snapshot.spawn({
+    name: 'restored',
+    wait_ready: false,
+  });
+
+  assert.equal(createServiceBody.instance_snapshot_id, 'snapshot-id');
+  assert.equal(createServiceBody.definition, undefined);
+  assert.equal(createServiceBody.project_id, 'project-id');
+  assert.equal(createAppBody.project_id, 'project-id');
+});
+
+test('snapshot uses the running instance and maps API state', async () => {
+  const sandbox = createSandbox();
+  let createSnapshotBody;
+
+  sandbox.api = {
+    listInstances: async () => [{ id: 'instance-id' }],
+    createInstanceSnapshot: async (body) => {
+      createSnapshotBody = body;
+      return {
+        id: 'snapshot-id',
+        name: body.name,
+        service_id: 'service-id',
+        type: body.type,
+        status: 'INSTANCE_SNAPSHOT_STATUS_AVAILABLE',
+      };
+    },
+  };
+
+  const snapshot = await sandbox.snapshot('filesystem-snapshot', SnapshotType.FILESYSTEM, false);
+
+  assert.deepEqual(createSnapshotBody, {
+    instance_id: 'instance-id',
+    name: 'filesystem-snapshot',
+    type: 'INSTANCE_SNAPSHOT_TYPE_FILESYSTEM',
+  });
+  assert.equal(snapshot.id, 'snapshot-id');
+  assert.equal(snapshot.status, SnapshotStatus.AVAILABLE);
 });

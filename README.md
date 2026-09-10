@@ -54,25 +54,32 @@ Creates a new sandbox.
 
 #### Options
 
-| Option                             | Description                                                              |
-| ---------------------------------- | ------------------------------------------------------------------------ |
-| `image`                            | Docker image to boot. Defaults to `koyeb/sandbox`.                       |
-| `name`                             | Name shown in Koyeb and used in resource names.                          |
-| `wait_ready`                       | Wait until the sandbox becomes healthy (enabled by default)              |
-| `instance_type`                    | Instance size to provision. Defaults to `micro`.                         |
-| `exposed_port_protocol`            | Protocol used by the exposed port (one of `http \| http2`).              |
-| `env`                              | Environment variables injected into the container.                       |
-| `region`                           | Koyeb region slug. Defaults to `'na'` (north america).                   |
-| `api_token`                        | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`.  |
-| `timeout`                          | Seconds to wait while checking readiness.                                |
-| `idle_timeout`                     | Seconds before the sandbox scales to zero. Set `0` to disable sleep.     |
-| `enable_tcp_proxy`                 | Enable TCP proxying on port 3031.                                        |
-| `privileged`                       | Run the sandbox in privileged mode.                                      |
-| `registry_secret`                  | Name of the Koyeb registry secret required to pull private images.       |
-| `delete_after_delay`               | Time to wait before automatically deleting the sandbox after creation.   |
-| `delete_after_inactivity_delay`    | Time to wait before automatically deleting the sandbox after inactivity. |
-| `_experimental_enable_light_sleep` | When enabled, uses idle_timeout for light_sleep and sets deep_sleep=3900. |
-| `block_network`                    | Block all outbound network access. Mutually exclusive with `outbound_allowlist`. |
+| Option                             | Description                                                                                                                         |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `image`                            | Docker image to boot. Defaults to `koyeb/sandbox`.                                                                                  |
+| `name`                             | Name shown in Koyeb and used in resource names.                                                                                     |
+| `wait_ready`                       | Wait until the sandbox becomes healthy (enabled by default)                                                                         |
+| `instance_type`                    | Instance size to provision. Defaults to `micro`.                                                                                    |
+| `exposed_port_protocol`            | Protocol used by the exposed port (one of `http \| http2`).                                                                         |
+| `env`                              | Environment variables injected into the container.                                                                                  |
+| `region`                           | Koyeb region slug. Defaults to `'na'` (north america).                                                                              |
+| `api_token`                        | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`.                                                             |
+| `timeout`                          | Seconds to wait while checking readiness.                                                                                           |
+| `idle_timeout`                     | Seconds before the sandbox scales to zero. Set `0` to disable sleep.                                                                |
+| `enable_tcp_proxy`                 | Enable TCP proxying on port 3031.                                                                                                   |
+| `privileged`                       | Run the sandbox in privileged mode.                                                                                                 |
+| `registry_secret`                  | Name of the Koyeb registry secret required to pull private images.                                                                  |
+| `app_id`                           | Existing app that receives the sandbox service.                                                                                     |
+| `project_id`                       | Project for a new app and service. Defaults to `KOYEB_PROJECT_ID`.                                                                  |
+| `enable_mesh`                      | Enable or disable the Koyeb service mesh.                                                                                           |
+| `entrypoint`                       | Docker entrypoint override.                                                                                                         |
+| `command`                          | Docker command override.                                                                                                            |
+| `args`                             | Docker command arguments.                                                                                                           |
+| `snapshot`                         | Snapshot object or filesystem snapshot ID used to create the sandbox.                                                               |
+| `delete_after_delay`               | Time to wait before automatically deleting the sandbox after creation.                                                              |
+| `delete_after_inactivity_delay`    | Time to wait before automatically deleting the sandbox after inactivity.                                                            |
+| `_experimental_enable_light_sleep` | When enabled, uses idle_timeout for light_sleep and sets deep_sleep=3900.                                                           |
+| `block_network`                    | Block all outbound network access. Mutually exclusive with `outbound_allowlist`.                                                    |
 | `outbound_allowlist`               | IPs/CIDRs allowed as outbound destinations; all other traffic is blocked. Bare IPs are normalized to `/32` (IPv4) or `/128` (IPv6). |
 
 ### `Sandbox.get_from_id(serviceId, apiToken?)`
@@ -92,13 +99,23 @@ Load an existing Sandbox from a Koyeb service ID. Useful for long-lived integrat
 | `update_lifecycle()`                                     | Change the auto deletion properties.                                             |
 | `update_network_policy(values?)`                         | Update the egress policy (block, allowlist, or reset). Triggers a redeployment.  |
 | `delete()`                                               | Tears down the underlying service.                                               |
+| `snapshot(name, type?, wait?, timeout?)`                 | Creates a filesystem or full snapshot.                                           |
+
+## Snapshots
+
+Use `SnapshotType.FILESYSTEM` to preserve files.
+Use `SnapshotType.FULL` to preserve files and process state.
+
+`Snapshot.spawn()` creates a sandbox from a snapshot.
+`DeclarativeSnapshot` creates a reusable filesystem snapshot from files and commands.
+`Sandbox.template()` creates a declarative snapshot builder.
 
 ## Command Execution
 
-| Method                       | Description                                                                                            |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `exec(cmd, options?)`        | Runs a command. Supports `cwd`, `env`, `timeout`, and `AbortSignal`.                                    |
-| `exec_stream(cmd, options?)` | Streams command output. Emits `stdout`, `stderr`, `exit`, `end`, and `error`.                           |
+| Method                       | Description                                                                   |
+| ---------------------------- | ----------------------------------------------------------------------------- |
+| `exec(cmd, options?)`        | Runs a command. Supports `cwd`, `env`, `timeout`, and `AbortSignal`.          |
+| `exec_stream(cmd, options?)` | Streams command output. Emits `stdout`, `stderr`, `exit`, `end`, and `error`. |
 
 ### Streaming Example
 

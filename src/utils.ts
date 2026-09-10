@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import net from 'node:net';
 import type { koyeb } from './api.js';
 import { EgressPolicyError } from './errors.js';
@@ -35,9 +36,7 @@ function isConfigFile(value: EnvValue | ConfigFile): value is ConfigFile {
   return typeof value === 'object' && value !== null && 'content' in value;
 }
 
-export function buildConfigFiles(
-  files?: Record<string, EnvValue | ConfigFile>,
-): koyeb.ConfigFile[] {
+export function buildConfigFiles(files?: Record<string, EnvValue | ConfigFile>): koyeb.ConfigFile[] {
   if (!files) {
     return [];
   }
@@ -237,33 +236,25 @@ export function omitUndefined<T extends object>(object: T): T {
   return Object.fromEntries(Object.entries(object).filter(([_, value]) => value !== undefined)) as T;
 }
 
-export function createArray<T>(length: number, init: (index: number) => T) {
-  return Array(length)
-    .fill(null)
-    .map((_, index) => init(index));
-}
-
-export function randomFloat(max: number) {
-  return Math.random() * max;
-}
-
-export function randomInteger(max: number) {
-  return Math.floor(randomFloat(max));
-}
-
-export function randomItem<T>(items: T[]) {
-  return items[randomInteger(items.length - 1)];
-}
-
 export function wait(ms: number, signal?: AbortSignal) {
   return new Promise<boolean>((resolve) => {
-    const timeout = setTimeout(() => resolve(true), ms);
+    if (signal?.aborted) {
+      resolve(false);
+      return;
+    }
+
+    const finish = (result: boolean) => {
+      signal?.removeEventListener('abort', abort);
+      resolve(result);
+    };
+    const abort = () => {
+      clearTimeout(timeout);
+      finish(false);
+    };
+    const timeout = setTimeout(() => finish(true), ms);
 
     if (signal) {
-      signal.addEventListener('abort', () => {
-        clearTimeout(timeout);
-        resolve(false);
-      });
+      signal.addEventListener('abort', abort, { once: true });
     }
   });
 }
@@ -275,13 +266,22 @@ export async function waitFor(
   signal?: AbortSignal,
 ) {
   const start = Date.now();
+  let currentInterval = Math.min(0.1, interval);
 
   do {
+    if (signal?.aborted) {
+      return false;
+    }
+
     if (await predicate()) {
       return true;
     }
 
-    await wait(interval * 1_000, signal);
+    if (!(await wait(currentInterval * 1_000, signal))) {
+      return false;
+    }
+
+    currentInterval = Math.min(currentInterval * 2, interval);
   } while (Date.now() - start < timeout * 1_000);
 
   return false;
@@ -293,15 +293,13 @@ export function getEnv(name: string) {
   }
 }
 
-export function nanoId(alphabet: string) {
-  const letters = alphabet.split('');
-
-  return (length: number) => {
-    return createArray(length, () => randomItem(letters)).join('');
-  };
+export function randomString(byteLength: number): string {
+  return randomBytes(byteLength).toString('base64url');
 }
 
-export const randomString = nanoId('-_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz');
+export function escapeShellArg(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
 
 export type Duration = number | `${number}${'s' | 'm' | 'h' | 'd'}`;
 

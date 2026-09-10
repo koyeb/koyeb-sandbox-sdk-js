@@ -1,6 +1,10 @@
 export const DEFAULT_API_HOST = 'https://app.koyeb.com';
-export const DEFAULT_WAIT_TIMEOUT = 300;
+export const DEFAULT_CREATE_TIMEOUT = 300;
+export const DEFAULT_WAIT_TIMEOUT = 60;
 export const DEFAULT_IDLE_TIMEOUT = 300;
-export const DEFAULT_POLL_INTERVAL = 2;
+export const DEFAULT_POLL_INTERVAL = 0.5;
+export const DEFAULT_HTTP_TIMEOUT = 30;
+export const DEFAULT_MAX_RETRIES = 3;
+export const DEFAULT_RETRY_BACKOFF = 1;
 export const PORT_MIN = 1;
 export const PORT_MAX = 65535;

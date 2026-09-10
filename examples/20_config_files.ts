@@ -1,80 +1,38 @@
-/**
- * Config files with secrets and interpolation.
- */
+import assert from 'node:assert/strict';
+
 import { KoyebApi, Sandbox } from '@koyeb/sandbox-sdk';
-import { strict as assert } from 'node:assert';
 
-const apiToken = process.env.KOYEB_API_TOKEN;
-if (!apiToken) {
-  console.error('Error: KOYEB_API_TOKEN not set');
-  process.exit(1);
-}
+import { exampleName, requireApiToken, runExample, sandboxOptions } from './_helpers.js';
 
-const suffix = Math.random().toString(36).slice(2, 10);
-const secretName = `test-secret-${suffix}`;
-const secretValue = 'secret-value-123';
-
-const api = new KoyebApi(apiToken);
-
-let sandbox: Sandbox | undefined;
-let secretId: string | undefined;
-
-async function main() {
-  // Create a Koyeb secret
-  const secret = await api.createSecret({ name: secretName, value: secretValue });
-  secretId = secret.id;
-  console.log(`Created secret: ${secretName}`);
-
-  // Create sandbox with config files referencing the secret and using interpolation
-  sandbox = await Sandbox.create({
-    image: 'koyeb/sandbox:slim',
-    name: `config-files-${suffix}`,
-    wait_ready: true,
-    api_token: apiToken,
-    env: {
-      X: '2',
-      // Secret as env var: rendered as "{{ secret.<name> }}"
-      MY_SECRET: secret,
-    },
-    config_files: {
-      // SecretRef value: server expands "{{ secret.<name> }}"
-      '/tmp/secret_config.txt': { name: secretName },
-      // Plain string with env interpolation; default permissions 0644
-      '/tmp/interpolation.txt': '{{ X }}',
-      // ConfigFile object with custom permissions
-      '/tmp/restricted.txt': { content: 'only-owner-readable', permissions: '0600' },
-    },
+await runExample('config files', async () => {
+  const apiToken = requireApiToken();
+  const api = new KoyebApi(apiToken);
+  const secretName = exampleName('config-secret');
+  const secretValue = 'secret-value-123';
+  const secret = await api.createSecret({
+    name: secretName,
+    value: secretValue,
+    project_id: process.env.KOYEB_PROJECT_ID || undefined,
   });
-  console.log(`Sandbox ID: ${sandbox.id}`);
+  let sandbox: Sandbox | undefined;
 
-  // Secret reference in config file
-  let result = await sandbox.exec('cat /tmp/secret_config.txt');
-  assert.equal(result.stdout.trim(), secretValue);
-  console.log(`/tmp/secret_config.txt=${result.stdout.trim()}`);
-
-  // Env var interpolation in config file
-  result = await sandbox.exec('cat /tmp/interpolation.txt');
-  assert.equal(result.stdout.trim(), '2');
-  console.log(`/tmp/interpolation.txt=${result.stdout.trim()}`);
-
-  // Custom permissions
-  result = await sandbox.exec("stat -c '%a' /tmp/restricted.txt");
-  assert.equal(result.stdout.trim(), '600');
-  console.log(`/tmp/restricted.txt permissions=${result.stdout.trim()}`);
-
-  // Secret env var was resolved
-  result = await sandbox.exec('printenv MY_SECRET');
-  assert.equal(result.stdout.trim(), secretValue);
-  console.log(`MY_SECRET=${result.stdout.trim()}`);
-}
-
-async function cleanup() {
-  if (sandbox) {
-    await sandbox.delete().catch(console.error);
+  try {
+    sandbox = await Sandbox.create(
+      sandboxOptions('config-files', {
+        env: { X: '2', MY_SECRET: secret },
+        config_files: {
+          '/tmp/secret.txt': { name: secretName },
+          '/tmp/interpolation.txt': '{{ X }}',
+          '/tmp/restricted.txt': { content: 'owner-only', permissions: '0600' },
+        },
+      }),
+    );
+    assert.equal((await sandbox.exec('cat /tmp/secret.txt')).stdout.trim(), secretValue);
+    assert.equal((await sandbox.exec('cat /tmp/interpolation.txt')).stdout.trim(), '2');
+    assert.equal((await sandbox.exec("stat -c '%a' /tmp/restricted.txt")).stdout.trim(), '600');
+    assert.equal((await sandbox.exec('printenv MY_SECRET')).stdout.trim(), secretValue);
+  } finally {
+    await sandbox?.delete();
+    if (secret.id) await api.deleteSecret(secret.id);
   }
-  if (secretId) {
-    await api.deleteSecret(secretId).catch(console.error);
-  }
-}
-
-main().catch(console.error).finally(cleanup);
+});

@@ -1,36 +1,19 @@
-import { Sandbox } from '@koyeb/sandbox-sdk';
+import assert from 'node:assert/strict';
 
-const sandbox = await Sandbox.create({ name: 'batch-ops', image: 'koyeb/sandbox:slim' });
-console.log(`Sandbox ID: ${sandbox.id}`);
-const fs = sandbox.filesystem;
+import { runExample, withSandbox } from './_helpers.js';
 
-async function main() {
-  const filesToCreate = [
-    { path: '/tmp/file1.txt', content: 'Content of file 1' },
-    { path: '/tmp/file2.txt', content: 'Content of file 2' },
-    { path: '/tmp/file3.txt', content: 'Content of file 3' },
-  ];
-
-  await fs.write_files(filesToCreate);
-  console.log('Created 3 files');
-
-  const createdFiles = await fs.list_dir('/tmp');
-  const batchFiles = createdFiles.filter((f) => f.startsWith('file'));
-  console.log(`Files: ${batchFiles.join(', ')}`);
-
-  const projectFiles = [
-    { path: '/tmp/project/main.py', content: "print('Hello')" },
-    { path: '/tmp/project/utils.py', content: 'def helper(): pass' },
-    { path: '/tmp/project/README.md', content: '# My Project' },
-  ];
-
-  await fs.mkdir('/tmp/project', true);
-  await fs.write_files(projectFiles);
-  console.log('Created project structure');
-}
-
-async function cleanup() {
-  await sandbox.delete();
-}
-
-main().catch(console.error).finally(cleanup);
+await runExample('batch operations', async () => {
+  await withSandbox('batch-operations', {}, async (sandbox) => {
+    const files = [
+      { path: '/tmp/file1.txt', content: 'one' },
+      { path: '/tmp/file2.txt', content: 'two' },
+      { path: '/tmp/file3.txt', content: 'three' },
+    ];
+    await sandbox.filesystem.write_files(files);
+    const contents = await Promise.all(files.map(({ path }) => sandbox.filesystem.read_file(path)));
+    assert.deepEqual(
+      contents.map((file) => file.content),
+      files.map((file) => file.content),
+    );
+  });
+});

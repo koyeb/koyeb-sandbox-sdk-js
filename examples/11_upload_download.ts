@@ -1,31 +1,27 @@
-import { Sandbox } from '@koyeb/sandbox-sdk';
-import { randomBytes } from 'node:crypto';
-import { readFile, unlink, writeFile } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const sandbox = await Sandbox.create({ name: 'upload-download', image: 'koyeb/sandbox:slim' });
-console.log(`Sandbox ID: ${sandbox.id}`);
-const fs = sandbox.filesystem;
+import { runExample, withSandbox } from './_helpers.js';
 
-const tmpName = (suffix: string) => join(tmpdir(), `tmp-${randomBytes(6).toString('hex')}${suffix}`);
-const local_file = tmpName('_local.txt');
-const downloaded_file = tmpName('_downloaded.txt');
+await runExample('upload and download', async () => {
+  const directory = join(tmpdir(), `koyeb-example-${process.pid}`);
+  const source = join(directory, 'source.txt');
+  const destination = join(directory, 'destination.txt');
+  await import('node:fs/promises').then((fs) => fs.mkdir(directory, { recursive: true }));
 
-async function main() {
-  await writeFile(local_file, 'This is a local file\nUploaded to Koyeb Sandbox!');
-  await fs.upload_file(local_file, '/tmp/uploaded_file.txt');
+  try {
+    await withSandbox('upload-download', {}, async (sandbox) => {
+      const content = 'Upload and download test';
+      await writeFile(source, content);
+      await sandbox.filesystem.upload_file(source, '/tmp/uploaded.txt');
+      assert.equal((await sandbox.filesystem.read_file('/tmp/uploaded.txt')).content, content);
 
-  const uploaded_info = await fs.read_file('/tmp/uploaded_file.txt');
-  console.log(uploaded_info.content);
-
-  await fs.write_file('/tmp/download_source.txt', 'Download test content\nMultiple lines');
-  await fs.download_file(downloaded_file, '/tmp/download_source.txt');
-  console.log((await readFile(downloaded_file)).toString());
-}
-
-async function cleanup() {
-  await Promise.allSettled([unlink(local_file), unlink(downloaded_file), sandbox.delete()]);
-}
-
-main().catch(console.error).finally(cleanup);
+      await sandbox.filesystem.download_file(destination, '/tmp/uploaded.txt');
+      assert.equal(await readFile(destination, 'utf8'), content);
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

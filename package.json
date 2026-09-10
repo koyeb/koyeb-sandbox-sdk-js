@@ -1,6 +1,7 @@
 {
   "name": "@koyeb/sandbox-sdk",
   "version": "1.0.10",
+  "packageManager": "pnpm@10.26.1",
   "description": "Koyeb Sandbox JavaScript SDK",
   "repository": "git://github.com/koyeb/koyeb-sandbox-sdk-js.git",
   "author": "Koyeb <support@koyeb.com>",
@@ -14,6 +15,9 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsc",
+    "examples:build": "tsc -p examples/tsconfig.json",
+    "examples:check": "pnpm build && tsc -p examples/tsconfig.json --noEmit",
+    "examples:e2e": "pnpm build && pnpm examples:build && node .examples-build/00_run_all.js",
     "test": "pnpm build && node --test test/*.test.mjs",
     "prepublishOnly": "pnpm build",
     "release": "pnpm build && pnpm publish"

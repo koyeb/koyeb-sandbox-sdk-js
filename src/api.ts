@@ -20,7 +20,7 @@ export class KoyebApi {
     private readonly token?: string,
     private readonly debug = process.env.KOYEB_DEBUG === 'true',
   ) {
-    this.baseUrl = getEnv('KOYEB_API_HOST') ?? DEFAULT_API_HOST;
+    this.baseUrl = getEnv('KOYEB_API_HOST') || DEFAULT_API_HOST;
   }
 
   private async api<T extends { error: Error } | { data: unknown }>(
@@ -100,9 +100,34 @@ export class KoyebApi {
     return response!.service!;
   }
 
+  async listInstances(query: Query<'listInstances'>) {
+    const response = await this.api(koyeb.listInstances({ ...this.params, query }));
+    return response!.instances!;
+  }
+
   async getDeployment(id: string) {
     const response = await this.api(koyeb.getDeployment({ ...this.params, path: { id } }));
     return response!.deployment!;
+  }
+
+  async listInstanceSnapshots(query?: Query<'listInstanceSnapshots'>) {
+    const response = await this.api(koyeb.listInstanceSnapshots({ ...this.params, query }));
+    return response!.instance_snapshots!;
+  }
+
+  async createInstanceSnapshot(body: Body<'createInstanceSnapshot'>) {
+    const response = await this.api(koyeb.createInstanceSnapshot({ ...this.params, body }));
+    return response!.instance_snapshot!;
+  }
+
+  async getInstanceSnapshot(id: string) {
+    const response = await this.api(koyeb.getInstanceSnapshot({ ...this.params, path: { id } }));
+    return response!.instance_snapshot!;
+  }
+
+  async deleteInstanceSnapshot(id: string) {
+    const response = await this.api(koyeb.deleteInstanceSnapshot({ ...this.params, path: { id } }));
+    return response!.instance_snapshot!;
   }
 
   async createSecret(body: Body<'createSecret'>) {

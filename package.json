@@ -14,7 +14,7 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsc",
-    "test": "tsc -p tsconfig.test.json && vitest run",
+    "test": "pnpm build && tsc -p tsconfig.test.json && vitest run && node --test test/*.test.mjs",
     "prepublishOnly": "pnpm build",
     "release": "pnpm build && pnpm publish"
   },

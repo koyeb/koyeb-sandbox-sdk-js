@@ -21,7 +21,7 @@ export class KoyebApi {
     private readonly token?: string,
     private readonly debug = process.env.KOYEB_DEBUG === 'true',
   ) {
-    this.baseUrl = getEnv('KOYEB_API_HOST') ?? DEFAULT_API_HOST;
+    this.baseUrl = getEnv('KOYEB_API_HOST') || DEFAULT_API_HOST;
   }
 
   private async api<T extends { error: Error } | { data: unknown }>(
@@ -42,6 +42,10 @@ export class KoyebApi {
       auth: `Bearer ${this.token}`,
       fetch: this.fetch,
     };
+  }
+
+  private projectHeaders(projectId?: string) {
+    return projectId ? { 'x-koyeb-project-id': projectId } : undefined;
   }
 
   private fetch: typeof globalThis.fetch = async (request) => {
@@ -66,8 +70,10 @@ export class KoyebApi {
     return response!.app!;
   }
 
-  async createApp(body: Body<'createApp'>) {
-    const response = await this.api(koyeb.createApp({ ...this.params, body }));
+  async createApp(body: Body<'createApp'>, projectId?: string) {
+    const response = await this.api(
+      koyeb.createApp({ ...this.params, headers: this.projectHeaders(projectId), body }),
+    );
     return response!.app!;
   }
 
@@ -86,8 +92,10 @@ export class KoyebApi {
     return response!.service!;
   }
 
-  async createService(body: Body<'createService'>, query?: Query<'createService'>) {
-    const response = await this.api(koyeb.createService({ ...this.params, query, body }));
+  async createService(body: Body<'createService'>, query?: Query<'createService'>, projectId?: string) {
+    const response = await this.api(
+      koyeb.createService({ ...this.params, headers: this.projectHeaders(projectId), query, body }),
+    );
     return response!.service!;
   }
 
@@ -101,13 +109,40 @@ export class KoyebApi {
     return response!.service!;
   }
 
+  async listInstances(query: Query<'listInstances'>) {
+    const response = await this.api(koyeb.listInstances({ ...this.params, query }));
+    return response!.instances!;
+  }
+
   async getDeployment(id: string) {
     const response = await this.api(koyeb.getDeployment({ ...this.params, path: { id } }));
     return response!.deployment!;
   }
 
-  async createSecret(body: Body<'createSecret'>) {
-    const response = await this.api(koyeb.createSecret({ ...this.params, body }));
+  async listInstanceSnapshots(query?: Query<'listInstanceSnapshots'>) {
+    const response = await this.api(koyeb.listInstanceSnapshots({ ...this.params, query }));
+    return response!.instance_snapshots!;
+  }
+
+  async createInstanceSnapshot(body: Body<'createInstanceSnapshot'>) {
+    const response = await this.api(koyeb.createInstanceSnapshot({ ...this.params, body }));
+    return response!.instance_snapshot!;
+  }
+
+  async getInstanceSnapshot(id: string) {
+    const response = await this.api(koyeb.getInstanceSnapshot({ ...this.params, path: { id } }));
+    return response!.instance_snapshot!;
+  }
+
+  async deleteInstanceSnapshot(id: string) {
+    const response = await this.api(koyeb.deleteInstanceSnapshot({ ...this.params, path: { id } }));
+    return response!.instance_snapshot!;
+  }
+
+  async createSecret(body: Body<'createSecret'>, projectId?: string) {
+    const response = await this.api(
+      koyeb.createSecret({ ...this.params, headers: this.projectHeaders(projectId), body }),
+    );
     return response!.secret!;
   }
 

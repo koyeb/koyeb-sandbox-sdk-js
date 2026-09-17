@@ -9,3 +9,12 @@ export {
   type SandboxProcess,
   type SandboxProcessStatus,
 } from './sandbox.js';
+export {
+  claim,
+  get_claim,
+  wait_claim_ready,
+  type ClaimOptions,
+  type ClaimResult,
+  type GetClaimOptions,
+  type WaitClaimReadyOptions,
+} from './pool.js';

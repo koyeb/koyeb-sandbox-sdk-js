@@ -1,7 +1,7 @@
 import * as koyeb from '@koyeb/api-client-js';
-import { DEFAULT_API_HOST } from './constants.js';
+import { DEFAULT_API_HOST, DEFAULT_CLAIM_ATTEMPTS, DEFAULT_CLAIM_RETRY_DELAY_MS } from './constants.js';
 import { formatRequest, formatResponse } from './format.js';
-import { assert, getEnv } from './utils.js';
+import { assert, getEnv, wait } from './utils.js';
 
 export type { koyeb };
 
@@ -113,4 +113,40 @@ export class KoyebApi {
   async deleteSecret(id: string) {
     await this.api(koyeb.deleteSecret({ ...this.params, path: { id } }));
   }
+
+  async claim(body: Body<'claim'>): Promise<koyeb.PoolClaimReply> {
+    let attempt = 1;
+
+    for (;;) {
+      const result = await koyeb.claim({ ...this.params, body });
+
+      if (result.error !== undefined) {
+        const status = result.response?.status;
+
+        if (attempt >= DEFAULT_CLAIM_ATTEMPTS || !isRetryableClaimStatus(status)) {
+          throw result.error;
+        }
+
+        await wait(DEFAULT_CLAIM_RETRY_DELAY_MS * attempt);
+        attempt += 1;
+        continue;
+      }
+
+      return result.data;
+    }
+  }
+
+  async getClaim(claimId: string, requestId?: string) {
+    const query = requestId !== undefined ? { request_id: requestId } : undefined;
+    const response = await this.api(koyeb.getClaim({ ...this.params, path: { claim_id: claimId }, query }));
+    return response!.claim!;
+  }
+}
+
+// Claiming is idempotent per (pool_id, request_id), so transient failures are
+// safe to retry: network-level errors (no response) and rate-limit or server
+// errors replay the same claim. Client errors (validation, auth, missing pool)
+// are surfaced immediately.
+function isRetryableClaimStatus(status: number | undefined) {
+  return status === undefined || status === 429 || status >= 500;
 }

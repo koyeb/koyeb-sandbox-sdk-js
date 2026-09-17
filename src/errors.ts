@@ -1,3 +1,4 @@
+import type { koyeb } from './api.js';
 import { PORT_MAX, PORT_MIN } from './constants.js';
 
 export class MissingApiTokenError extends Error {
@@ -45,5 +46,20 @@ export class SandboxRequestError extends Error {
 export class EgressPolicyError extends Error {
   constructor(message: string) {
     super(message);
+  }
+}
+
+export class PoolClaimError extends Error {
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+export class ServiceTerminalStateError extends Error {
+  constructor(
+    public readonly service_id: string,
+    public readonly status: koyeb.ServiceStatus,
+  ) {
+    super(`Service '${service_id}' reached terminal state '${status}' and will not become ready.`);
   }
 }

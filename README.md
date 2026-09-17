@@ -79,6 +79,68 @@ Creates a new sandbox.
 
 Load an existing Sandbox from a Koyeb service ID. Useful for long-lived integrations.
 
+## Claiming Sandboxes from a Pool
+
+Service pools keep prewarmed sandboxes ready to claim. Claiming is idempotent: replaying a claim with the same `(pool_id, request_id)` pair always returns the same claim — the API never provisions a second sandbox or consumes another pool member.
+
+### `claim(poolId, options?)`
+
+Claims a sandbox from a pool and returns a `ClaimResult` with `claim_id`, `pool_id`, `request_id`, `service_id` and `prewarmed`. `sandbox_id` is optional and only present when the API returns it.
+
+- **Warm path** (`prewarmed: true`): the claimed sandbox is already running and ready to use.
+- **Cold path** (`prewarmed: false`): a new sandbox service is created on demand. `service_id` is returned immediately; wait for it with [`wait_claim_ready`](#wait_claim_readyclaimorserviceid-options).
+
+The SDK retries transient failures (network errors, `429`, `5xx`) automatically, reusing the same `request_id`, so retries never double-claim.
+
+| Option       | Description                                                                                       |
+| ------------ | ------------------------------------------------------------------------------------------------- |
+| `request_id` | Idempotency key of the claim. Generated once (UUID v4) when omitted and preserved across retries. |
+| `api_token`  | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`.                           |
+
+### `get_claim(claimId, options?)`
+
+Fetches a claim's current state (`PENDING`, `FULFILLED`, `FAILED` or `RELEASED`).
+
+| Option       | Description                                                             |
+| ------------ | ----------------------------------------------------------------------- |
+| `request_id` | Request id the claim was created with, disambiguating replayed claims.  |
+| `api_token`  | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`. |
+
+### `wait_claim_ready(claimOrServiceId, options?)`
+
+Cold-path helper: polls Get Service until the claimed sandbox is ready. Accepts a `ClaimResult` or a service ID.
+
+Resolves to `true` once the service is `HEALTHY` or `DEGRADED` (usable), or `false` if it is not ready within `timeout` seconds. Throws `ServiceTerminalStateError` as soon as the service reaches a state it cannot recover from — unknown statuses included (fail closed). State mapping confirmed in KOYEB-6290.
+
+| Service status                                                   | Outcome          |
+| ---------------------------------------------------------------- | ---------------- |
+| `HEALTHY`, `DEGRADED`                                            | Ready            |
+| `STARTING`, `RESUMING`                                           | Keep polling     |
+| `UNHEALTHY`, `DELETING`, `DELETED`, `PAUSING`, `PAUSED`, unknown | Terminal failure |
+
+| Option          | Description                                                             |
+| --------------- | ----------------------------------------------------------------------- |
+| `timeout`       | Seconds to wait before giving up. Defaults to 300.                      |
+| `poll_interval` | Seconds between Get Service polls. Defaults to 2.                       |
+| `api_token`     | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`. |
+| `signal`        | `AbortSignal` to stop waiting early.                                    |
+
+```js
+import { Sandbox, claim, wait_claim_ready } from '@koyeb/sandbox-sdk';
+
+const claimed = await claim('my-pool');
+console.log(claimed.prewarmed ? 'Warm claim' : 'Cold claim');
+
+if (!claimed.prewarmed) {
+  const ready = await wait_claim_ready(claimed, { timeout: 300 });
+  if (!ready) throw new Error('Claimed sandbox was not ready in time');
+}
+
+const sandbox = await Sandbox.get_from_id(claimed.service_id);
+await sandbox.exec('echo ready');
+await sandbox.delete();
+```
+
 ## Sandbox Lifecycle & Metadata
 
 | Method                                                   | Description                                                                      |
@@ -168,6 +230,8 @@ The SDK exports the following error classes for granular handling:
 - `NoSandboxSecretError`
 - `SandboxRequestError`
 - `EgressPolicyError`
+- `PoolClaimError`
+- `ServiceTerminalStateError`
 
 ## Contributing
 

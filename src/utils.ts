@@ -1,5 +1,6 @@
 import net from 'node:net';
 import type { koyeb } from './api.js';
+import { DEFAULT_IDLE_TIMEOUT } from './constants.js';
 import { EgressPolicyError } from './errors.js';
 import type { ConfigFile, EnvValue } from './sandbox.js';
 
@@ -35,9 +36,7 @@ function isConfigFile(value: EnvValue | ConfigFile): value is ConfigFile {
   return typeof value === 'object' && value !== null && 'content' in value;
 }
 
-export function buildConfigFiles(
-  files?: Record<string, EnvValue | ConfigFile>,
-): koyeb.ConfigFile[] {
+export function buildConfigFiles(files?: Record<string, EnvValue | ConfigFile>): koyeb.ConfigFile[] {
   if (!files) {
     return [];
   }
@@ -257,14 +256,23 @@ export function randomItem<T>(items: T[]) {
 
 export function wait(ms: number, signal?: AbortSignal) {
   return new Promise<boolean>((resolve) => {
-    const timeout = setTimeout(() => resolve(true), ms);
-
-    if (signal) {
-      signal.addEventListener('abort', () => {
-        clearTimeout(timeout);
-        resolve(false);
-      });
+    // An already-aborted signal never fires the listener: resolve up front.
+    if (signal?.aborted) {
+      resolve(false);
+      return;
     }
+
+    const onAbort = () => {
+      clearTimeout(timeout);
+      resolve(false);
+    };
+
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve(true);
+    }, ms);
+
+    signal?.addEventListener('abort', onAbort);
   });
 }
 
@@ -277,6 +285,11 @@ export async function waitFor(
   const start = Date.now();
 
   do {
+    // An already-aborted signal never fires wait()'s listener: stop up front.
+    if (signal?.aborted) {
+      return false;
+    }
+
     if (await predicate()) {
       return true;
     }
@@ -325,4 +338,92 @@ export function parseDuration(input: undefined | number | string): number | unde
     h: value * 60 * 60,
     d: value * 60 * 60 * 24,
   }[unit];
+}
+
+/**
+ * Options for building a SANDBOX-type DeploymentDefinition.
+ */
+export type DefinitionOptions = Partial<{
+  name: string;
+  type: koyeb.DeploymentDefinitionType;
+  image: string;
+  instance_type: string;
+  region: string;
+  env: Record<string, EnvValue>;
+  config_files: Record<string, EnvValue | ConfigFile>;
+  privileged: boolean;
+  registry_secret: string;
+  exposed_port_protocol: 'http' | 'http2';
+  enable_tcp_proxy: boolean;
+  idle_timeout: number;
+  _experimental_enable_light_sleep: boolean;
+  block_network: boolean;
+  outbound_allowlist: string[];
+}>;
+
+/**
+ * Build a DeploymentDefinition from curated flags. The `type` defaults to
+ * SANDBOX but pools may pass other types (WEB, WORKER, DATABASE).
+ * Shared by `Sandbox.create` and `ServicePool.create`.
+ */
+export function buildDefinition(opts: DefinitionOptions): {
+  definition: koyeb.DeploymentDefinition;
+  sandbox_secret: string;
+} {
+  const network_policy = buildNetworkPolicy(opts.block_network, opts.outbound_allowlist);
+
+  const definition: koyeb.DeploymentDefinition = {
+    name: opts.name,
+    type: opts.type ?? 'SANDBOX',
+    docker: {
+      image: opts.image,
+      privileged: opts.privileged,
+      image_registry_secret: opts.registry_secret,
+    },
+    instance_types: [{ type: opts.instance_type }],
+    regions: [opts.region ?? 'na'],
+    ports: [
+      { port: 3030, protocol: 'http' },
+      { port: 3031, protocol: opts.exposed_port_protocol ?? 'http' },
+    ],
+    routes: [
+      { port: 3030, path: '/koyeb-sandbox/' },
+      { port: 3031, path: '/' },
+    ],
+  };
+
+  const sandbox_secret = randomString(32);
+
+  definition.env = [{ key: 'SANDBOX_SECRET', value: sandbox_secret }, ...buildEnvVars(opts.env)];
+
+  const config_files = buildConfigFiles(opts.config_files);
+  if (config_files.length > 0) {
+    definition.config_files = config_files;
+  }
+
+  if (network_policy) {
+    definition.network_policy = network_policy;
+  }
+
+  const idle_timeout = opts.idle_timeout ?? DEFAULT_IDLE_TIMEOUT;
+
+  if (idle_timeout > 0) {
+    let sleep_idle_delay: koyeb.DeploymentScalingTargetSleepIdleDelay;
+
+    if (opts._experimental_enable_light_sleep) {
+      sleep_idle_delay = { light_sleep_value: idle_timeout, deep_sleep_value: 3900 };
+    } else {
+      sleep_idle_delay = { deep_sleep_value: idle_timeout };
+    }
+
+    definition.scalings = [{ min: 0, max: 1, targets: [{ sleep_idle_delay }] }];
+  } else {
+    definition.scalings = [{ min: 1, max: 1 }];
+  }
+
+  if (opts.enable_tcp_proxy) {
+    definition.proxy_ports = [{ port: 3031, protocol: 'tcp' }];
+  }
+
+  return { definition, sandbox_secret };
 }

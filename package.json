@@ -14,6 +14,7 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsc",
+    "test": "tsc -p tsconfig.test.json && vitest run",
     "prepublishOnly": "pnpm build",
     "release": "pnpm build && pnpm publish"
   },
@@ -28,7 +29,8 @@
     "@koyeb/api-client-js": "^1.2.0",
     "@types/node": "^24.10.4",
     "prettier": "^3.7.4",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
   },
   "prettier": {
     "printWidth": 120,

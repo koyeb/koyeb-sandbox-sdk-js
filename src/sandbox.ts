@@ -23,6 +23,7 @@ import {
   parseDuration,
   randomString,
   waitFor,
+  buildDefinition,
 } from './utils.js';
 
 /**
@@ -133,62 +134,22 @@ export class Sandbox {
       throw new MissingApiTokenError();
     }
 
-    // Validate egress arguments before any API call so invalid input fails fast.
-    const network_policy = buildNetworkPolicy(opts.block_network, opts.outbound_allowlist);
-
-    const definition: koyeb.DeploymentDefinition = {
+    const { definition, sandbox_secret } = buildDefinition({
       name: opts.name,
-      type: 'SANDBOX',
-      docker: {
-        image: opts.image,
-        privileged: opts.privileged,
-        image_registry_secret: opts.registry_secret,
-      },
-      instance_types: [{ type: opts.instance_type }],
-      regions: [region],
-      ports: [
-        { port: 3030, protocol: 'http' },
-        { port: 3031, protocol: opts.exposed_port_protocol },
-      ],
-      routes: [
-        { port: 3030, path: '/koyeb-sandbox/' },
-        { port: 3031, path: '/' },
-      ],
-    };
-
-    const sandbox_secret = randomString(32);
-
-    definition.env = [
-      { key: 'SANDBOX_SECRET', value: sandbox_secret },
-      ...buildEnvVars(opts.env),
-    ];
-
-    const config_files = buildConfigFiles(opts.config_files);
-    if (config_files.length > 0) {
-      definition.config_files = config_files;
-    }
-
-    if (network_policy) {
-      definition.network_policy = network_policy;
-    }
-
-    if (opts.idle_timeout > 0) {
-      let sleep_idle_delay: koyeb.DeploymentScalingTargetSleepIdleDelay;
-
-      if (opts._experimental_enable_light_sleep) {
-        sleep_idle_delay = { light_sleep_value: opts.idle_timeout, deep_sleep_value: 3900 };
-      } else {
-        sleep_idle_delay = { deep_sleep_value: opts.idle_timeout };
-      }
-
-      definition.scalings = [{ min: 0, max: 1, targets: [{ sleep_idle_delay }] }];
-    } else {
-      definition.scalings = [{ min: 1, max: 1 }];
-    }
-
-    if (opts.enable_tcp_proxy) {
-      definition.proxy_ports = [{ port: 3031, protocol: 'tcp' }];
-    }
+      image: opts.image,
+      instance_type: opts.instance_type,
+      region,
+      env: opts.env,
+      config_files: opts.config_files,
+      privileged: opts.privileged,
+      registry_secret: opts.registry_secret,
+      exposed_port_protocol: opts.exposed_port_protocol,
+      enable_tcp_proxy: opts.enable_tcp_proxy,
+      idle_timeout: opts.idle_timeout,
+      _experimental_enable_light_sleep: opts._experimental_enable_light_sleep,
+      block_network: opts.block_network,
+      outbound_allowlist: opts.outbound_allowlist,
+    });
 
     const service = await this.createService(token, opts, definition);
     const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, sandbox_secret, token);
@@ -347,8 +308,7 @@ export class Sandbox {
       if (!deploymentId) return;
 
       const deployment = await this.api.getDeployment(deploymentId);
-      const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)
-        ?.sandbox;
+      const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)?.sandbox;
 
       if (sandbox?.public_url && sandbox?.routing_key) {
         return { public_url: sandbox.public_url, routing_key: sandbox.routing_key };

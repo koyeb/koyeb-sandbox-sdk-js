@@ -1,0 +1,5 @@
+# pnpm 11 blocks dependency build scripts by default; esbuild's postinstall
+# (vitest's transpiler) is required for the test suite. This file replaces
+# the interactive `pnpm approve-builds` so CI and fresh installs work.
+allowBuilds:
+  esbuild: true

@@ -75,14 +75,14 @@ function parseIp(value: string): { version: 4 | 6; bits: bigint } | undefined {
       part === ''
         ? []
         : part.split(':').flatMap((group) => {
-            if (group.includes('.')) {
-              // Embedded IPv4 (e.g. `::ffff:1.2.3.4`) maps to two 16-bit groups.
-              const v4 = parseIp(group)!.bits;
-              return [(v4 >> 16n) & 0xffffn, v4 & 0xffffn];
-            }
+          if (group.includes('.')) {
+            // Embedded IPv4 (e.g. `::ffff:1.2.3.4`) maps to two 16-bit groups.
+            const v4 = parseIp(group)!.bits;
+            return [(v4 >> 16n) & 0xffffn, v4 & 0xffffn];
+          }
 
-            return [BigInt(parseInt(group, 16))];
-          });
+          return [BigInt(parseInt(group, 16))];
+        });
 
     const left = toGroups(head);
     const right = toGroups(tail);
@@ -110,7 +110,7 @@ function formatIp(version: 4 | 6, bits: bigint): string {
   // Compress the longest run of zero groups per RFC 5952.
   let bestStart = -1;
   let bestLen = 0;
-  for (let start = 0; start < 8; ) {
+  for (let start = 0; start < 8;) {
     let end = start;
     while (end < 8 && groups[end] === 0) end++;
 
@@ -147,7 +147,7 @@ function normalizeDestination(entry: string): string {
   if (value.includes('%')) {
     throw new EgressPolicyError(
       `Invalid outbound_allowlist entry ${JSON.stringify(entry)}: ` +
-        'expected an IP address or CIDR (scoped/zone-ID addresses are not allowed)',
+      'expected an IP address or CIDR (scoped/zone-ID addresses are not allowed)',
     );
   }
 
@@ -381,7 +381,7 @@ export function buildDefinition(opts: DefinitionOptions): {
       image_registry_secret: opts.registry_secret,
     },
     instance_types: [{ type: opts.instance_type }],
-    regions: [opts.region ?? 'na'],
+    regions: [opts.region ?? getEnv('KOYEB_REGION') ?? 'na'],
     ports: [
       { port: 3030, protocol: 'http' },
       { port: 3031, protocol: opts.exposed_port_protocol ?? 'http' },

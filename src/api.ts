@@ -1,7 +1,8 @@
 import * as koyeb from '@koyeb/api-client-js';
-import { DEFAULT_API_HOST } from './constants.js';
+import { DEFAULT_API_HOST, DEFAULT_CLAIM_ATTEMPTS, DEFAULT_CLAIM_RETRY_DELAY_MS } from './constants.js';
 import { formatRequest, formatResponse } from './format.js';
-import { assert, getEnv } from './utils.js';
+import { assert, getEnv, wait } from './utils.js';
+import { ServicePoolError } from './errors.js';
 
 export type { koyeb };
 
@@ -113,4 +114,77 @@ export class KoyebApi {
   async deleteSecret(id: string) {
     await this.api(koyeb.deleteSecret({ ...this.params, path: { id } }));
   }
+
+  async claim(body: Body<'claim'>): Promise<koyeb.PoolClaimReply> {
+    let attempt = 1;
+
+    for (; ;) {
+      const result = await koyeb.claim({ ...this.params, body });
+
+      if (result.error !== undefined) {
+        const status = result.response?.status;
+
+        if (attempt >= DEFAULT_CLAIM_ATTEMPTS || !isRetryableClaimStatus(status)) {
+          throw result.error;
+        }
+
+        await wait(DEFAULT_CLAIM_RETRY_DELAY_MS * attempt);
+        attempt += 1;
+        continue;
+      }
+
+      return result.data;
+    }
+  }
+
+  async getClaim(claimId: string) {
+    const response = await this.api(koyeb.getClaim({ ...this.params, path: { claim_id: claimId } }));
+    return response!.claim!;
+  }
+
+  async createServicePool(body: Body<'createServicePool'>) {
+    const response = await this.api(koyeb.createServicePool({ ...this.params, body }));
+    return response!.service_pool!;
+  }
+
+  async getServicePool(id: string) {
+    const response = await this.api(koyeb.getServicePool({ ...this.params, path: { id } }));
+    return response!.service_pool!;
+  }
+
+  async listServicePools(query?: Query<'listServicePools'>) {
+    const response = await this.api(koyeb.listServicePools({ ...this.params, query }));
+    return response!.service_pools ?? [];
+  }
+
+  async updateServicePool(id: string, body: Body<'updateServicePool'>) {
+    const response = await this.api(koyeb.updateServicePool({ ...this.params, path: { id }, body }));
+    return response!.service_pool!;
+  }
+
+  async deleteServicePool(id: string) {
+    const response = await this.fetch(
+      new Request(`${this.baseUrl}/v1/service_pools/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${this.token}` },
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new ServicePoolError(
+        `Failed to delete service pool '${id}': ${response.status} ${response.statusText}${body ? `: ${JSON.stringify(body)}` : ''}`,
+      );
+    }
+  }
+
+  async listClaims(poolId: string, query?: Query<'listClaim'>) {
+    const response = await this.api(koyeb.listClaim({ ...this.params, path: { pool_id: poolId }, query }));
+    return response!.claims ?? [];
+  }
+}
+
+// Claiming is idempotent per (pool_id, request_id): only transient failures (no response, 429, 5xx) are retried.
+function isRetryableClaimStatus(status: number | undefined) {
+  return status === undefined || status === 429 || status >= 500;
 }

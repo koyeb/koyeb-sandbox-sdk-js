@@ -14,7 +14,6 @@ import {
 } from './constants.js';
 import {
   InvalidPortError,
-  MissingApiTokenError,
   NoSandboxSecretError,
   SandboxCommandError,
   SandboxDeploymentError,
@@ -35,9 +34,10 @@ import {
 import { handleServerSentEvents } from './server-sent-event.js';
 import { TypedEventTarget } from './typed-event-target.js';
 import { buildNetworkPolicy } from './cidr.js';
+import { resolveClient } from './credentials.js';
 import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
 import { type Duration, parseDuration } from './duration.js';
-import { assert, getEnv, isDefined, isUndefined, omitUndefined } from './prelude.js';
+import { assert, isDefined, isUndefined, omitUndefined } from './prelude.js';
 import { wait, waitFor } from './time.js';
 
 // Value types live with the definition module; re-exported for the public surface.
@@ -181,11 +181,7 @@ export class Sandbox {
 
   static async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
     const opts = { ...this.defaultCreateSandboxOptions, ...omitUndefined(options) };
-    const token = opts.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
+    const { token } = resolveClient(opts);
 
     const { definition, sandbox_secret } = buildDefinition({
       name: opts.name,
@@ -320,13 +316,8 @@ export class Sandbox {
   static async list(
     options: { app_id?: string; name?: string; api_token?: string; host?: string } = {},
   ): Promise<Sandbox[]> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
+    const { token, client: api } = resolveClient(options);
 
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
-
-    const api = new KoyebApi(token, undefined, options.host);
     const sandboxes: Sandbox[] = [];
     const limit = 100;
     let offset = 0;
@@ -385,13 +376,7 @@ export class Sandbox {
   }
 
   static async get_from_id(serviceId: string, apiToken?: string, host?: string) {
-    const token = apiToken ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
-
-    const api = new KoyebApi(token, undefined, host);
+    const { token, client: api } = resolveClient({ api_token: apiToken, host });
     const service = await api.getService(serviceId);
     // Prefer the live deployment over the latest one, matching the Python
     // SDK: a rolled-back sandbox must resolve to the deployment that is

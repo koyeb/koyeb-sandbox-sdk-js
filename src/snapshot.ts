@@ -2,9 +2,10 @@ import { join } from 'node:path';
 
 import { koyeb, KoyebApi } from './api.js';
 import { DEFAULT_SNAPSHOT_POLL_INTERVAL, DEFAULT_SNAPSHOT_WAIT_TIMEOUT } from './constants.js';
-import { MissingApiTokenError, SandboxError, SandboxTimeoutError } from './errors.js';
+import { resolveClient } from './credentials.js';
+import { SandboxError, SandboxTimeoutError } from './errors.js';
 import { Sandbox } from './sandbox.js';
-import { assert, getEnv, omitUndefined } from './prelude.js';
+import { assert, omitUndefined } from './prelude.js';
 import { waitFor } from './time.js';
 
 export type SnapshotType = 'FILESYSTEM' | 'FULL';
@@ -79,10 +80,7 @@ export class Snapshot {
   }
 
   static async get(id: string, options: { api_token?: string; host?: string } = {}): Promise<Snapshot> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-    assert(token, new MissingApiTokenError());
-
-    const api = new KoyebApi(token, undefined, options.host);
+    const { token, client: api } = resolveClient(options);
     const model = await api.getInstanceSnapshot(id);
     assert(model?.id, new SandboxError(`Snapshot ${id} not found`));
 
@@ -90,10 +88,7 @@ export class Snapshot {
   }
 
   static async list(filter: ListSnapshotsFilter = {}): Promise<Snapshot[]> {
-    const token = filter.api_token ?? getEnv('KOYEB_API_TOKEN');
-    assert(token, new MissingApiTokenError());
-
-    const api = new KoyebApi(token, undefined, filter.host);
+    const { token, client: api } = resolveClient(filter);
     const models = await api.listInstanceSnapshots(
       omitUndefined({
         type: filter.type ? API_SNAPSHOT_TYPES[filter.type] : undefined,
@@ -198,10 +193,11 @@ export class DeclarativeSnapshot {
     private readonly image: string,
     private readonly options: TemplateOptions = {},
   ) {
-    if (!(options.api_token ?? getEnv('KOYEB_API_TOKEN'))) {
-      throw new MissingApiTokenError();
-    }
+    // Validate presence now; build() threads the resolved token into Sandbox.create.
+    this.resolvedToken = resolveClient(options).token;
   }
+
+  private readonly resolvedToken: string;
 
   file(path: string, content: string): this {
     this.files.set(path, content);
@@ -222,7 +218,7 @@ export class DeclarativeSnapshot {
     this.builder = await Sandbox.create({
       image: this.image,
       name: `builder-${this.name}`,
-      ...(this.options.api_token !== undefined ? { api_token: this.options.api_token } : {}),
+      api_token: this.resolvedToken,
       ...(this.options.host !== undefined ? { host: this.options.host } : {}),
     });
 

@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 
 import { koyeb, KoyebApi } from './api.js';
 import { DEFAULT_CLAIM_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT } from './constants.js';
-import { MissingApiTokenError, PoolClaimError, ServiceTerminalStateError } from './errors.js';
-import { assert, getEnv, omitUndefined } from './prelude.js';
+import { resolveClient } from './credentials.js';
+import { PoolClaimError, ServiceTerminalStateError } from './errors.js';
+import { assert, omitUndefined } from './prelude.js';
 import { waitFor } from './time.js';
 
 /**
@@ -79,13 +80,7 @@ export type WaitClaimReadyOptions = Partial<{
  * returns the same claim without consuming another pool member.
  */
 export async function claim(poolId: string, options: ClaimOptions = {}): Promise<ClaimResult> {
-  const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-  if (!token) {
-    throw new MissingApiTokenError();
-  }
-
-  const api = new KoyebApi(token);
+  const { client: api } = resolveClient(options);
 
   const request_id = options.request_id ?? randomUUID();
 
@@ -108,13 +103,7 @@ export async function claim(poolId: string, options: ClaimOptions = {}): Promise
  * `FAILED` or `RELEASED`).
  */
 export async function get_claim(claimId: string, options: GetClaimOptions = {}): Promise<koyeb.PoolClaim> {
-  const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-  if (!token) {
-    throw new MissingApiTokenError();
-  }
-
-  const api = new KoyebApi(token);
+  const { client: api } = resolveClient(options);
 
   return api.getClaim(claimId);
 }
@@ -123,13 +112,7 @@ export async function get_claim(claimId: string, options: GetClaimOptions = {}):
  * List claims on a service pool, optionally filtered by status.
  */
 export async function list_claims(poolId: string, options: ListClaimsOptions = {}): Promise<koyeb.PoolClaim[]> {
-  const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-  if (!token) {
-    throw new MissingApiTokenError();
-  }
-
-  const api = new KoyebApi(token);
+  const { client: api } = resolveClient(options);
 
   return api.listClaims(
     poolId,
@@ -168,13 +151,7 @@ export async function wait_claim_ready(
 ): Promise<boolean> {
   const service_id = typeof claimOrServiceId === 'string' ? claimOrServiceId : claimOrServiceId.service_id;
 
-  const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-  if (!token) {
-    throw new MissingApiTokenError();
-  }
-
-  const api = new KoyebApi(token);
+  const { client: api } = resolveClient(options);
 
   return waitFor(
     async () => {

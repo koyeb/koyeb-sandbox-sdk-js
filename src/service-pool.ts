@@ -5,10 +5,11 @@ import {
   DEFAULT_POOL_INSTANCE_TYPE,
   DEFAULT_POOL_SIZE,
 } from './constants.js';
-import { MissingApiTokenError, ServicePoolError } from './errors.js';
+import { resolveClient } from './credentials.js';
+import { ServicePoolError } from './errors.js';
 import type { ConfigFile, EnvValue } from './sandbox.js';
 import type { ListClaimsOptions } from './claim.js';
-import { assert, getEnv, omitUndefined } from './prelude.js';
+import { assert, omitUndefined } from './prelude.js';
 import { buildDefinition, type DefinitionOptions } from './definition.js';
 
 /**
@@ -73,17 +74,12 @@ export class ServicePool {
   }
 
   static async create(name: string, options: CreatePoolOptions = {}): Promise<ServicePool> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
+    const { token, client: api } = resolveClient(options);
 
     // Options are a DefinitionOptions superset: thread them whole so no
     // accepted field can be silently dropped by hand-maintaining this list.
     const { definition } = buildDefinition({ ...options, name });
 
-    const api = new KoyebApi(token);
     const pool = await api.createServicePool(
       omitUndefined({ name, size: options.size ?? DEFAULT_POOL_SIZE, definition }),
     );
@@ -92,26 +88,14 @@ export class ServicePool {
   }
 
   static async get(poolId: string, options: { api_token?: string } = {}): Promise<ServicePool> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
-
-    const api = new KoyebApi(token);
+    const { token, client: api } = resolveClient(options);
     const pool = await api.getServicePool(poolId);
 
     return ServicePool._from_model(pool, token);
   }
 
   static async list(options: ListPoolsOptions = {}): Promise<ServicePool[]> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
-
-    const api = new KoyebApi(token);
+    const { token, client: api } = resolveClient(options);
     const pools = await api.listServicePools(
       omitUndefined({ name: options.name, limit: options.limit, offset: options.offset }),
     );

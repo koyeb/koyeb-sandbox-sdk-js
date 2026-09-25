@@ -5,6 +5,7 @@ import { DEFAULT_CLAIM_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT } from './constants.j
 import { resolveClient } from './credentials.js';
 import { PoolClaimError, ServiceTerminalStateError } from './errors.js';
 import { assert, omitUndefined } from './prelude.js';
+import { classifyServiceStatus } from './readiness.js';
 import { waitFor } from './time.js';
 
 /**
@@ -118,24 +119,6 @@ export async function list_claims(poolId: string, options: ListClaimsOptions = {
     poolId,
     omitUndefined({ status: options.status, limit: options.limit, offset: options.offset }),
   );
-}
-
-/**
- * Service-status classification: `HEALTHY` and `DEGRADED` are usable,
- * `STARTING` and `RESUMING` are still in progress, and every other state —
- * including unknown forward-compat values — is a terminal failure (fail
- * closed). Not cold-path-specific: this is general service health.
- */
-export function classifyServiceStatus(status: koyeb.ServiceStatus): 'ready' | 'in_progress' | 'terminal_failure' {
-  if (status === 'HEALTHY' || status === 'DEGRADED') {
-    return 'ready';
-  }
-
-  if (status === 'STARTING' || status === 'RESUMING') {
-    return 'in_progress';
-  }
-
-  return 'terminal_failure';
 }
 
 /**

@@ -34,7 +34,8 @@ import { ExecutorGateway } from './executor-gateway.js';
 import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
 import { type Duration, parseDuration } from './duration.js';
 import { assert, isDefined, isUndefined, omitUndefined } from './prelude.js';
-import { wait, waitFor } from './time.js';
+import { classifyDeploymentStatus } from './readiness.js';
+import { waitFor, waitForPhased } from './time.js';
 
 // Value types live with the definition module; re-exported for the public surface.
 export type { ConfigFile, EnvValue, SecretRef } from './definition.js';
@@ -386,36 +387,16 @@ export class Sandbox {
     pollInterval = this.poll_interval,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    // Python latches deployment health: once the deployment is confirmed
-    // healthy, only the executor is polled for the rest of the wait.
-    const start = Date.now();
-    let delay = Math.min(DEFAULT_WAIT_START_INTERVAL, pollInterval);
-    let deploymentReady = false;
-
-    while (Date.now() - start < timeout * 1_000) {
-      if (signal?.aborted) {
-        return false;
-      }
-
-      if (!deploymentReady) {
-        deploymentReady = await this.deployment_healthy();
-
-        if (!deploymentReady) {
-          await wait(delay * 1_000, signal);
-          delay = Math.min(pollInterval, delay * 2);
-          continue;
-        }
-      }
-
-      if (await this.executor_healthy()) {
-        return true;
-      }
-
-      await wait(delay * 1_000, signal);
-      delay = Math.min(pollInterval, delay * 2);
-    }
-
-    return false;
+    // Python latches deployment health: the phased wait advances from the
+    // deployment phase to the executor phase on first success, then only
+    // polls the executor for the rest of the wait.
+    return waitForPhased(
+      [() => this.deployment_healthy(), () => this.executor_healthy()],
+      timeout,
+      pollInterval,
+      signal,
+      DEFAULT_WAIT_START_INTERVAL,
+    );
   }
 
   async wait_tcp_proxy_ready(
@@ -808,27 +789,3 @@ export class Sandbox {
   }
 }
 
-const DEPLOYMENT_READY_STATUSES: koyeb.DeploymentStatus[] = ['HEALTHY', 'DEGRADED'];
-const DEPLOYMENT_IN_PROGRESS_STATUSES: koyeb.DeploymentStatus[] = [
-  'PENDING',
-  'PROVISIONING',
-  'SCHEDULED',
-  'ALLOCATING',
-  'STARTING',
-];
-
-/**
- * Classify a deployment status for readiness, failing closed: everything
- * outside the ready and in-progress sets is terminal (Python parity).
- */
-function classifyDeploymentStatus(status?: koyeb.DeploymentStatus) {
-  if (status && DEPLOYMENT_READY_STATUSES.includes(status)) {
-    return 'ready';
-  }
-
-  if (status && DEPLOYMENT_IN_PROGRESS_STATUSES.includes(status)) {
-    return 'in_progress';
-  }
-
-  return 'terminal_failure';
-}

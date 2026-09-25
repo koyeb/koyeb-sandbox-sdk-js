@@ -689,10 +689,11 @@ export class Sandbox {
   }
 
   /** Create a new sandbox booted from a snapshot (object, or name/ID string). */
+  /** Create a new sandbox booted from a snapshot. Options are the full create options (Python's **create_kwargs). */
   static async create_from_snapshot(
     snapshot: Snapshot | string,
     name?: string,
-    options: Partial<{ wait_ready: boolean; timeout: number; api_token: string; host: string }> = {},
+    options: CreateSandboxOptions = {},
   ): Promise<Sandbox> {
     return Sandbox.create({ snapshot, ...(name !== undefined ? { name } : {}), ...options });
   }

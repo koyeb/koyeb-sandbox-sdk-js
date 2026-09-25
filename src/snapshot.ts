@@ -4,7 +4,7 @@ import { koyeb, KoyebApi } from './api.js';
 import { DEFAULT_SNAPSHOT_POLL_INTERVAL, DEFAULT_SNAPSHOT_WAIT_TIMEOUT } from './constants.js';
 import { resolveClient } from './credentials.js';
 import { SandboxError, SandboxTimeoutError } from './errors.js';
-import { Sandbox } from './sandbox.js';
+import { Sandbox, type CreateSandboxOptions } from './sandbox.js';
 import { assert, omitUndefined } from './prelude.js';
 import { waitFor } from './time.js';
 
@@ -157,13 +157,18 @@ export class Snapshot {
     await this.api.deleteInstanceSnapshot(this.id);
   }
 
-  async spawn(name?: string, options: Partial<{ api_token: string; host: string; sandbox_secret: string }> = {}): Promise<Sandbox> {
+  /**
+   * Spawn a sandbox from this snapshot. Options are the full create options
+   * (Python's **create_kwargs): image, instance_type, env, wait_ready, ... —
+   * explicit options override the snapshot's stored credentials.
+   */
+  async spawn(name?: string, options: CreateSandboxOptions = {}): Promise<Sandbox> {
     return Sandbox.create({
       snapshot: this,
-      ...(name !== undefined ? { name } : {}),
       ...(this.api_token !== undefined ? { api_token: this.api_token } : {}),
       ...(this.host !== undefined ? { host: this.host } : {}),
       ...(this.sandbox_secret !== undefined ? { sandbox_secret: this.sandbox_secret } : {}),
+      ...(name !== undefined ? { name } : {}),
       ...options,
     });
   }

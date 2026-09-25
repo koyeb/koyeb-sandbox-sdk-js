@@ -115,6 +115,33 @@ describe('Snapshot', () => {
       sandbox_secret: 'sec',
     });
   });
+
+  it('spawn threads every create option through, like Python **create_kwargs', async () => {
+    const createSpy = vi.spyOn(Sandbox, 'create').mockResolvedValue(makeSandbox());
+    vi.spyOn(KoyebApi.prototype, 'getInstanceSnapshot').mockResolvedValue(MODEL as never);
+    const snapshot = await Snapshot.get('snap-1', { api_token: 'stored' });
+
+    await snapshot.spawn('runner', {
+      image: 'python:3.12',
+      instance_type: 'nano',
+      env: { RUNNER: 'yes' },
+      wait_ready: false,
+      timeout: 60,
+      api_token: 'explicit',
+    });
+
+    expect(createSpy.mock.calls[0][0]).toMatchObject({
+      snapshot,
+      name: 'runner',
+      image: 'python:3.12',
+      instance_type: 'nano',
+      env: { RUNNER: 'yes' },
+      wait_ready: false,
+      timeout: 60,
+      // Explicit options override the snapshot's stored credentials.
+      api_token: 'explicit',
+    });
+  });
 });
 
 describe('Sandbox.snapshot', () => {

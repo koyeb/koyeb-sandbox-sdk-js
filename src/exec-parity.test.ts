@@ -367,6 +367,19 @@ describe('SSE parser robustness', () => {
 });
 
 describe('exec_stream exit events', () => {
+  it('maps non-OK responses to the error event instead of hanging', async () => {
+    const sandbox = makeSandbox();
+    vi.spyOn(sandbox, 'fetch').mockResolvedValue(new Response('unavailable', { status: 503 }));
+
+    const stream = sandbox.exec_stream('boom');
+    const error = await new Promise<unknown>((resolve, reject) => {
+      stream.addEventListener('error', (event) => resolve((event as MessageEvent).data));
+      setTimeout(() => reject(new Error('no error event within 1s')), 1_000);
+    });
+
+    expect(error).toBeInstanceOf(SandboxError);
+  });
+
   it('emits exit with the completion payload before end', async () => {
     const sandbox = makeSandbox();
     vi.spyOn(sandbox, 'fetch').mockResolvedValue(

@@ -1,8 +1,5 @@
 import { koyeb, KoyebApi } from './api.js';
 import {
-  DEFAULT_COMMAND_TIMEOUT,
-  DEFAULT_EXECUTOR_RETRIES,
-  DEFAULT_EXECUTOR_RETRY_DELAY_MS,
   DEFAULT_IDLE_TIMEOUT,
   DEFAULT_INSTANCE_WAIT_TIMEOUT,
   DEFAULT_POLL_INTERVAL,
@@ -14,9 +11,7 @@ import {
 } from './constants.js';
 import {
   InvalidPortError,
-  MissingApiTokenError,
   NoSandboxSecretError,
-  SandboxCommandError,
   SandboxDeploymentError,
   SandboxError,
   SandboxRequestError,
@@ -24,52 +19,20 @@ import {
   SandboxTimeoutError,
 } from './errors.js';
 import { SandboxFilesystem } from './sandbox-filesystem.js';
-import {
-  DeclarativeSnapshot,
-  resolveSnapshot,
-  Snapshot,
-  type SnapshotOptions,
-  type SnapshotType,
-  type TemplateOptions,
-} from './snapshot.js';
-import { handleServerSentEvents } from './server-sent-event.js';
-import { TypedEventTarget } from './typed-event-target.js';
-import {
-  assert,
-  buildConfigFiles,
-  buildEnvVars,
-  buildNetworkPolicy,
-  Duration,
-  getEnv,
-  isDefined,
-  isUndefined,
-  omitUndefined,
-  parseDuration,
-  randomString,
-  waitFor,
-  wait,
-  buildDefinition,
-} from './utils.js';
+import { DeclarativeSnapshot, type TemplateOptions } from './declarative-snapshot.js';
+import type { Snapshot, SnapshotOptions, SnapshotType } from './snapshot.js';
+import { buildNetworkPolicy } from './cidr.js';
+import { resolveClient } from './credentials.js';
+import { CommandRunner } from './command-runner.js';
+import { ExecutorGateway } from './executor-gateway.js';
+import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
+import { type Duration, parseDuration } from './duration.js';
+import { assert, isDefined, isUndefined, omitUndefined } from './prelude.js';
+import { classifyDeploymentStatus } from './readiness.js';
+import { waitFor, waitForPhased } from './time.js';
 
-/**
- * Reference to a Koyeb secret by name. A full `koyeb.Secret` object also satisfies this
- * structurally (its `name` field is read at render time).
- */
-export type SecretRef = { name?: string };
-
-/**
- * A value usable in `env` or `config_files`.
- *
- * - `string`: passed verbatim. Server-side interpolation (`{{ X }}` and `{{ secret.foo }}`) still applies.
- * - `SecretRef` (e.g. `{ name: "my-secret" }` or a full `koyeb.Secret`): rendered as
- *   `"{{ secret.<name> }}"`.
- */
-export type EnvValue = string | SecretRef;
-
-/**
- * Config file with custom permissions. `content` accepts the same forms as env values.
- */
-export type ConfigFile = { content: EnvValue; permissions?: string };
+// Value types live with the definition module; re-exported for the public surface.
+export type { ConfigFile, EnvValue, SecretRef } from './definition.js';
 
 export type CreateSandboxOptions = Partial<{
   image: string;
@@ -120,40 +83,9 @@ export type CreateSandboxOptions = Partial<{
   cleanup_on_failure: boolean;
 }>;
 
-export type SandboxExec = TypedEventTarget<{
-  stdout: MessageEvent<{ stream: 'stdout'; data: string }>;
-  stderr: MessageEvent<{ stream: 'stderr'; data: string }>;
-  exit: MessageEvent<{ code?: number; error?: boolean | string }>;
-  end: Event;
-  error: MessageEvent<unknown>;
-}>;
-
-/** Result of a command run through {@link Sandbox.exec} (Python: CommandResult). */
-export type ExecResult = { stdout: string; stderr: string; code: number };
-
-/** Options shared by the buffered and streaming exec routes. */
-type ExecRouteOptions = {
-  cwd?: string;
-  env?: Record<string, string>;
-  timeout: number;
-  signal?: AbortSignal;
-};
-
-export type ExecOptions = {
-  cwd?: string;
-  env?: Record<string, string>;
-  /** Command timeout in seconds, enforced on the executor request (Python parity). */
-  timeout?: number;
-  /** Streaming stdout callback; when set, stdout is no longer buffered (Python parity). */
-  on_stdout?: (chunk: string) => void;
-  /** Streaming stderr callback; when set, stderr is no longer buffered (Python parity). */
-  on_stderr?: (chunk: string) => void;
-  /** Consume the SSE stream (default) or buffer server-side via /run. */
-  stream?: boolean;
-  /** Raise SandboxCommandError on non-zero exit (default false, Python parity). */
-  raise_on_error?: boolean;
-  signal?: AbortSignal;
-};
+// Command execution lives in the runner module; re-exported for the public surface.
+export type { ExecOptions, ExecResult, SandboxExec } from './command-runner.js';
+import type { ExecOptions, ExecResult, SandboxExec } from './command-runner.js';
 
 export type SandboxProcess = {
   id: string;
@@ -190,7 +122,18 @@ export class Sandbox {
     private readonly poll_interval: number = DEFAULT_POLL_INTERVAL,
   ) {
     this.api = new KoyebApi(this.api_token, undefined, this.host);
+    // Transport policy rides on this class's authorized fetch, so the seam
+    // tests already mock stays the seam.
+    this.gateway = new ExecutorGateway((path, init, body) => this.fetch(path, init, body));
+    this.runner = new CommandRunner({
+      name: this.name,
+      post: (path, init, body, hooks) => this.request(path, init, body, hooks),
+      raw: (path, init, body) => this.gateway.raw(path, init, body),
+    });
   }
+
+  private readonly gateway: ExecutorGateway;
+  private readonly runner: CommandRunner;
 
   get id(): string {
     return this.service_id;
@@ -209,11 +152,7 @@ export class Sandbox {
 
   static async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
     const opts = { ...this.defaultCreateSandboxOptions, ...omitUndefined(options) };
-    const token = opts.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
+    const { token } = resolveClient(opts);
 
     const { definition, sandbox_secret } = buildDefinition({
       name: opts.name,
@@ -239,7 +178,10 @@ export class Sandbox {
     });
 
     const resolvedSnapshot =
-      opts.snapshot !== undefined ? await resolveSnapshot(opts.snapshot, token, opts.host) : undefined;
+      opts.snapshot !== undefined
+        ? // Deferred: the snapshot module composes Sandbox, so resolve at call time.
+          await (await import('./snapshot.js')).resolveSnapshot(opts.snapshot, token, opts.host)
+        : undefined;
     const service = await this.createService(token, opts, definition, resolvedSnapshot);
     const sandbox = new Sandbox(
       service.app_id!,
@@ -348,13 +290,8 @@ export class Sandbox {
   static async list(
     options: { app_id?: string; name?: string; api_token?: string; host?: string } = {},
   ): Promise<Sandbox[]> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
+    const { token, client: api } = resolveClient(options);
 
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
-
-    const api = new KoyebApi(token, undefined, options.host);
     const sandboxes: Sandbox[] = [];
     const limit = 100;
     let offset = 0;
@@ -413,13 +350,7 @@ export class Sandbox {
   }
 
   static async get_from_id(serviceId: string, apiToken?: string, host?: string) {
-    const token = apiToken ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
-
-    const api = new KoyebApi(token, undefined, host);
+    const { token, client: api } = resolveClient({ api_token: apiToken, host });
     const service = await api.getService(serviceId);
     // Prefer the live deployment over the latest one, matching the Python
     // SDK: a rolled-back sandbox must resolve to the deployment that is
@@ -453,36 +384,16 @@ export class Sandbox {
     pollInterval = this.poll_interval,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    // Python latches deployment health: once the deployment is confirmed
-    // healthy, only the executor is polled for the rest of the wait.
-    const start = Date.now();
-    let delay = Math.min(DEFAULT_WAIT_START_INTERVAL, pollInterval);
-    let deploymentReady = false;
-
-    while (Date.now() - start < timeout * 1_000) {
-      if (signal?.aborted) {
-        return false;
-      }
-
-      if (!deploymentReady) {
-        deploymentReady = await this.deployment_healthy();
-
-        if (!deploymentReady) {
-          await wait(delay * 1_000, signal);
-          delay = Math.min(pollInterval, delay * 2);
-          continue;
-        }
-      }
-
-      if (await this.executor_healthy()) {
-        return true;
-      }
-
-      await wait(delay * 1_000, signal);
-      delay = Math.min(pollInterval, delay * 2);
-    }
-
-    return false;
+    // Python latches deployment health: the phased wait advances from the
+    // deployment phase to the executor phase on first success, then only
+    // polls the executor for the rest of the wait.
+    return waitForPhased(
+      [() => this.deployment_healthy(), () => this.executor_healthy()],
+      timeout,
+      pollInterval,
+      signal,
+      DEFAULT_WAIT_START_INTERVAL,
+    );
   }
 
   async wait_tcp_proxy_ready(
@@ -534,21 +445,9 @@ export class Sandbox {
   }
 
   private async executor_healthy(): Promise<boolean> {
-    try {
-      const conn = await this.get_conn_info();
-      const headers: Record<string, string> = { Authorization: `Bearer ${conn.secret}` };
-
-      if (conn.routing_key) {
-        headers['X-Routing-Key'] = conn.routing_key;
-      }
-
-      // Python bounds the health probe at 5s so a wedged executor cannot stall the wait.
-      const response = await fetch(`${conn.public_url}/health`, { headers, signal: AbortSignal.timeout(5_000) });
-
-      return response.ok;
-    } catch {
-      return false;
-    }
+    // Through the transport seam like every other executor call: one header
+    // assembly, and the 5s bound lives in the gateway (Python parity).
+    return this.gateway.health();
   }
 
   async get_tcp_proxy_info(): Promise<[host: string, public_port: number] | undefined> {
@@ -758,7 +657,7 @@ export class Sandbox {
     });
     assert(model?.id, new SandboxError('Failed to create snapshot: no snapshot returned from API'));
 
-    const snapshot = Snapshot.from_model(model, {
+    const snapshot = (await import('./snapshot.js')).Snapshot.from_model(model, {
       api_token: this.api_token,
       host: this.host,
       sandbox_secret: this.sandbox_secret,
@@ -822,186 +721,19 @@ export class Sandbox {
   }
 
   async request(path: string, init: RequestInit, requestBody?: unknown, hooks?: { onAttempt?: () => void }) {
-    // Transient executor unavailability (cold starts, restarts, 5xx, network
-    // blips): retry with exponential backoff before failing (Python parity).
-    let backoff = DEFAULT_EXECUTOR_RETRY_DELAY_MS;
-
-    for (let attempt = 0; ; attempt++) {
-      // Python re-arms the per-read timeout on every attempt.
-      hooks?.onAttempt?.();
-
-      let response: Response;
-
-      try {
-        response = await this.fetch(path, init, requestBody);
-      } catch (error) {
-        // Abort-driven failures are not transient; fail fast without retries.
-        if (init.signal?.aborted) {
-          throw error;
-        }
-
-        if (attempt >= DEFAULT_EXECUTOR_RETRIES) {
-          throw error instanceof SandboxError
-            ? error
-            : new SandboxError(`Request to sandbox executor failed: ${String(error)}`);
-        }
-
-        await wait(backoff, init.signal ?? undefined);
-        backoff *= 2;
-        continue;
-      }
-
-      if (response.status >= 500 && attempt < DEFAULT_EXECUTOR_RETRIES) {
-        // Free the connection before the retry and honor early aborts.
-        if (response.body) {
-          await response.body.cancel().catch(() => {});
-        }
-        await wait(backoff, init.signal ?? undefined);
-        backoff *= 2;
-        continue;
-      }
-
-      const contentType = response.headers.get('Content-Type');
-      const responseBody =
-        contentType?.startsWith('application/json') ? await response.json() : await response.text();
-
-      if (!response.ok) {
-        if (response.status >= 500) {
-          throw new SandboxServiceError(
-            response.status,
-            typeof responseBody === 'string' ? responseBody : JSON.stringify(responseBody),
-          );
-        }
-        throw new SandboxRequestError(response.status, responseBody);
-      }
-
-      return responseBody;
-    }
+    return this.gateway.post(path, init, requestBody, hooks);
   }
 
   get filesystem() {
     return new SandboxFilesystem(this);
   }
 
-  async exec(
-    cmd: string,
-    {
-      cwd,
-      env,
-      timeout = DEFAULT_COMMAND_TIMEOUT,
-      on_stdout,
-      on_stderr,
-      stream = true,
-      raise_on_error = false,
-      signal,
-    }: ExecOptions = {},
-  ): Promise<ExecResult> {
-    const result = await (stream
-      ? this.execStreaming(cmd, { cwd, env, timeout, on_stdout, on_stderr, signal })
-      : this.execBuffered(cmd, { cwd, env, timeout, signal }));
-
-    if (raise_on_error && result.code !== 0) {
-      throw new SandboxCommandError({ command: cmd, ...result });
-    }
-
-    return result;
+  async exec(cmd: string, options: ExecOptions = {}): Promise<ExecResult> {
+    return this.runner.run(cmd, options);
   }
 
-  /** Buffered route: one POST to /run, carrying the retrying request machinery. */
-  private async execBuffered(cmd: string, { cwd, env, timeout, signal }: ExecRouteOptions): Promise<ExecResult> {
-    const deadline = new Deadline(timeout, signal);
-
-    try {
-      const reply = await this.request(
-        '/run',
-        { method: 'POST', signal: deadline.signal },
-        { cmd, cwd, env },
-        { onAttempt: () => deadline.arm() },
-      );
-      // Normalize like Python's response.get(...) so partial replies type-check.
-      return { stdout: reply?.stdout ?? '', stderr: reply?.stderr ?? '', code: reply?.code ?? 0 };
-    } catch (error) {
-      throw deadline.mapFailure(error, this.name);
-    } finally {
-      deadline.dispose();
-    }
-  }
-
-  /** Streaming route: reassembles the SSE events into a command result, like Python's exec. */
-  private async execStreaming(
-    cmd: string,
-    {
-      cwd,
-      env,
-      timeout,
-      on_stdout,
-      on_stderr,
-      signal,
-    }: ExecRouteOptions & Pick<ExecOptions, 'on_stdout' | 'on_stderr'>,
-  ): Promise<ExecResult> {
-    // Python parity: callbacks consume chunks live; output is only buffered when neither is set.
-    const buffer = !on_stdout && !on_stderr;
-    const stdout: string[] = [];
-    const stderr: string[] = [];
-    let code = 0;
-    let startError: string | undefined;
-
-    const consume = (callback: ((chunk: string) => void) | undefined, chunks: string[]) => (event: Event) => {
-        const chunk = (event as MessageEvent<{ data: string }>).data.data;
-        if (callback) callback(chunk);
-        else if (buffer) chunks.push(chunk);
-      };
-    const emitter = new EventTarget();
-    emitter.addEventListener('stdout', consume(on_stdout, stdout));
-    emitter.addEventListener('stderr', consume(on_stderr, stderr));
-    emitter.addEventListener('exit', (event) => {
-      const data = (event as MessageEvent<{ code?: number; error?: boolean | string }>).data;
-      // Python checks "code" before "error": an explicit code always wins.
-      if (typeof data.code === 'number') {
-        code = data.code;
-      } else if (typeof data.error === 'string') {
-        startError = data.error;
-      }
-    });
-
-    const deadline = new Deadline(timeout, signal);
-
-    try {
-      const response = await this.fetch('/run_streaming', { method: 'POST', signal: deadline.signal }, { cmd, cwd, env });
-
-      if (!response.ok) {
-        const body = await response.text();
-        if (response.status >= 500) {
-          throw new SandboxServiceError(response.status, body);
-        }
-        throw new SandboxRequestError(response.status, body);
-      }
-
-      assert(response.body);
-      await handleServerSentEvents(emitter, response.body, () => deadline.arm());
-    } catch (error) {
-      throw deadline.mapStreamFailure(error, this.name);
-    } finally {
-      deadline.dispose();
-    }
-
-    if (startError !== undefined) {
-      // Python parity: a start failure discards partial output and exits 1.
-      return { stdout: '', stderr: startError, code: 1 };
-    }
-
-    return { stdout: stdout.join(''), stderr: stderr.join(''), code };
-  }
-
-  exec_stream(cmd: string, { cwd, env, signal }: Pick<ExecOptions, 'cwd' | 'env' | 'signal'> = {}): SandboxExec {
-    const emitter = new EventTarget();
-
-    this.fetch('/run_streaming', { method: 'POST', signal }, { cmd, cwd, env })
-      .then((response) => response.body)
-      .then((body) => body && handleServerSentEvents(emitter, body))
-      .catch((error) => emitter.dispatchEvent(new MessageEvent('error', { data: error })));
-
-    return emitter;
+  exec_stream(cmd: string, options: Pick<ExecOptions, 'cwd' | 'env' | 'signal'> = {}): SandboxExec {
+    return this.runner.stream(cmd, options);
   }
 
   async expose_port(port: number): Promise<{ port: number; exposed_at: string }> {
@@ -1054,101 +786,3 @@ export class Sandbox {
   }
 }
 
-const DEPLOYMENT_READY_STATUSES: koyeb.DeploymentStatus[] = ['HEALTHY', 'DEGRADED'];
-const DEPLOYMENT_IN_PROGRESS_STATUSES: koyeb.DeploymentStatus[] = [
-  'PENDING',
-  'PROVISIONING',
-  'SCHEDULED',
-  'ALLOCATING',
-  'STARTING',
-];
-
-/**
- * Classify a deployment status for readiness, failing closed: everything
- * outside the ready and in-progress sets is terminal (Python parity).
- */
-function classifyDeploymentStatus(status?: koyeb.DeploymentStatus) {
-  if (status && DEPLOYMENT_READY_STATUSES.includes(status)) {
-    return 'ready';
-  }
-
-  if (status && DEPLOYMENT_IN_PROGRESS_STATUSES.includes(status)) {
-    return 'in_progress';
-  }
-
-  return 'terminal_failure';
-}
-
-/**
- * Command deadline mirroring httpx's read timeout: the timer re-arms on every
- * received chunk, so a command that keeps producing output never times out
- * while a silent one aborts after `timeout` seconds.
- */
-class Deadline {
-  private timer?: ReturnType<typeof setTimeout>;
-  private fired = false;
-  private readonly controller = new AbortController();
-  private readonly onCallerAbort = () => this.controller.abort();
-
-  constructor(
-    private readonly timeout: number,
-    private readonly callerSignal?: AbortSignal,
-  ) {
-    if (callerSignal) {
-      callerSignal.addEventListener('abort', this.onCallerAbort, { once: true });
-
-      if (callerSignal.aborted) {
-        this.controller.abort();
-      }
-    }
-
-    this.arm();
-  }
-
-  get signal(): AbortSignal {
-    return this.controller.signal;
-  }
-
-  get aborted(): boolean {
-    return this.controller.signal.aborted;
-  }
-
-  arm(): void {
-    clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      this.fired = true;
-      this.controller.abort();
-    }, this.timeout * 1_000);
-    // A pending deadline must never keep the event loop alive.
-    this.timer.unref?.();
-  }
-
-  /** Distinguish deadline aborts from caller aborts: only the former are timeouts. */
-  mapFailure(error: unknown, sandboxName: string): unknown {
-    if (this.fired) {
-      return new SandboxTimeoutError(sandboxName, this.timeout, `Request timed out after ${this.timeout}s`);
-    }
-    return error;
-  }
-
-  /**
-   * Streaming failures map to the SDK taxonomy: timeouts map, typed errors and
-   * caller aborts pass through, lost connections become SandboxError like Python.
-   */
-  mapStreamFailure(error: unknown, sandboxName: string): unknown {
-    if (this.fired) {
-      return new SandboxTimeoutError(sandboxName, this.timeout, `Request timed out after ${this.timeout}s`);
-    }
-
-    if (error instanceof SandboxError || this.aborted) {
-      return error;
-    }
-
-    return new SandboxError(`Connection to sandbox lost: ${String(error)}`);
-  }
-
-  dispose(): void {
-    clearTimeout(this.timer);
-    this.callerSignal?.removeEventListener('abort', this.onCallerAbort);
-  }
-}

@@ -5,11 +5,12 @@ import {
   DEFAULT_POOL_INSTANCE_TYPE,
   DEFAULT_POOL_SIZE,
 } from './constants.js';
-import { MissingApiTokenError, ServicePoolError } from './errors.js';
+import { resolveClient } from './credentials.js';
+import { ServicePoolError } from './errors.js';
 import type { ConfigFile, EnvValue } from './sandbox.js';
 import type { ListClaimsOptions } from './claim.js';
-import { assert, buildDefinition, getEnv, omitUndefined } from './utils.js';
-import type { DefinitionOptions } from './utils.js';
+import { assert, omitUndefined } from './prelude.js';
+import { buildDefinition, type DefinitionOptions } from './definition.js';
 
 /**
  * Options for creating a service pool. Shares definition fields with
@@ -73,31 +74,12 @@ export class ServicePool {
   }
 
   static async create(name: string, options: CreatePoolOptions = {}): Promise<ServicePool> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
+    const { token, client: api } = resolveClient(options);
 
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
+    // Options are a DefinitionOptions superset: thread them whole so no
+    // accepted field can be silently dropped by hand-maintaining this list.
+    const { definition } = buildDefinition({ ...options, name });
 
-    const { definition } = buildDefinition({
-      name,
-      type: options.type,
-      image: options.image,
-      instance_type: options.instance_type,
-      region: options.region,
-      env: options.env,
-      config_files: options.config_files,
-      privileged: options.privileged,
-      registry_secret: options.registry_secret,
-      exposed_port_protocol: options.exposed_port_protocol,
-      enable_tcp_proxy: options.enable_tcp_proxy,
-      idle_timeout: options.idle_timeout,
-      _experimental_enable_light_sleep: options._experimental_enable_light_sleep,
-      block_network: options.block_network,
-      outbound_allowlist: options.outbound_allowlist,
-    });
-
-    const api = new KoyebApi(token);
     const pool = await api.createServicePool(
       omitUndefined({ name, size: options.size ?? DEFAULT_POOL_SIZE, definition }),
     );
@@ -106,26 +88,14 @@ export class ServicePool {
   }
 
   static async get(poolId: string, options: { api_token?: string } = {}): Promise<ServicePool> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
-
-    const api = new KoyebApi(token);
+    const { token, client: api } = resolveClient(options);
     const pool = await api.getServicePool(poolId);
 
     return ServicePool._from_model(pool, token);
   }
 
   static async list(options: ListPoolsOptions = {}): Promise<ServicePool[]> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
-
-    const api = new KoyebApi(token);
+    const { token, client: api } = resolveClient(options);
     const pools = await api.listServicePools(
       omitUndefined({ name: options.name, limit: options.limit, offset: options.offset }),
     );

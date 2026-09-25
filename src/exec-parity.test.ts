@@ -192,10 +192,10 @@ describe('exec deadline parity', () => {
   it('re-arms the deadline on every chunk, like a per-read timeout', async () => {
     const sandbox = makeSandbox();
     vi.spyOn(sandbox, 'fetch').mockImplementation(async (_path, init) => {
-      // A chunk every 40ms for 400ms: total runtime far exceeds the 0.25s
-      // deadline, but each 40ms gap is well inside it.
+      // A chunk every 40ms for 600ms: total runtime far exceeds the 0.5s
+      // deadline, but each 40ms gap is well inside it (12x margin).
       const body = sseBody(init.signal, async (emit, done) => {
-        for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < 15; i++) {
           await sleep(40);
           emit(output('stdout', `chunk-${i}`));
         }
@@ -205,9 +205,9 @@ describe('exec deadline parity', () => {
       return new Response(body, { status: 200 });
     });
 
-    const result = await sandbox.exec('long-running', { timeout: 0.25 });
+    const result = await sandbox.exec('long-running', { timeout: 0.5 });
 
-    expect(result.stdout).toBe('chunk-0chunk-1chunk-2chunk-3chunk-4chunk-5chunk-6chunk-7chunk-8chunk-9');
+    expect(result.stdout).toBe('chunk-0chunk-1chunk-2chunk-3chunk-4chunk-5chunk-6chunk-7chunk-8chunk-9chunk-10chunk-11chunk-12chunk-13chunk-14');
     expect(result.code).toBe(0);
   });
 
@@ -367,6 +367,19 @@ describe('SSE parser robustness', () => {
 });
 
 describe('exec_stream exit events', () => {
+  it('maps non-OK responses to the error event instead of hanging', async () => {
+    const sandbox = makeSandbox();
+    vi.spyOn(sandbox, 'fetch').mockResolvedValue(new Response('unavailable', { status: 503 }));
+
+    const stream = sandbox.exec_stream('boom');
+    const error = await new Promise<unknown>((resolve, reject) => {
+      stream.addEventListener('error', (event) => resolve((event as MessageEvent).data));
+      setTimeout(() => reject(new Error('no error event within 1s')), 1_000);
+    });
+
+    expect(error).toBeInstanceOf(SandboxError);
+  });
+
   it('emits exit with the completion payload before end', async () => {
     const sandbox = makeSandbox();
     vi.spyOn(sandbox, 'fetch').mockResolvedValue(

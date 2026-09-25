@@ -5,7 +5,8 @@ import { join } from 'node:path';
 
 import { KoyebApi } from './api.js';
 import { Sandbox } from './sandbox.js';
-import { DeclarativeSnapshot, Snapshot } from './snapshot.js';
+import { DeclarativeSnapshot } from './declarative-snapshot.js';
+import { Snapshot } from './snapshot.js';
 import { MissingApiTokenError, SandboxError, SandboxTimeoutError } from './errors.js';
 
 const MODEL = {

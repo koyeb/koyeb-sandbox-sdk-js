@@ -2,9 +2,11 @@ import { join } from 'node:path';
 
 import { koyeb, KoyebApi } from './api.js';
 import { DEFAULT_SNAPSHOT_POLL_INTERVAL, DEFAULT_SNAPSHOT_WAIT_TIMEOUT } from './constants.js';
-import { MissingApiTokenError, SandboxError, SandboxTimeoutError } from './errors.js';
+import { resolveClient } from './credentials.js';
+import { SandboxError, SandboxTimeoutError } from './errors.js';
 import { Sandbox } from './sandbox.js';
-import { assert, getEnv, omitUndefined, waitFor } from './utils.js';
+import { assert, omitUndefined } from './prelude.js';
+import { waitFor } from './time.js';
 
 export type SnapshotType = 'FILESYSTEM' | 'FULL';
 export type SnapshotStatus = 'INVALID' | 'CREATING' | 'AVAILABLE' | 'ERROR' | 'DELETING' | 'DELETED';
@@ -78,10 +80,7 @@ export class Snapshot {
   }
 
   static async get(id: string, options: { api_token?: string; host?: string } = {}): Promise<Snapshot> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-    assert(token, new MissingApiTokenError());
-
-    const api = new KoyebApi(token, undefined, options.host);
+    const { token, client: api } = resolveClient(options);
     const model = await api.getInstanceSnapshot(id);
     assert(model?.id, new SandboxError(`Snapshot ${id} not found`));
 
@@ -89,10 +88,7 @@ export class Snapshot {
   }
 
   static async list(filter: ListSnapshotsFilter = {}): Promise<Snapshot[]> {
-    const token = filter.api_token ?? getEnv('KOYEB_API_TOKEN');
-    assert(token, new MissingApiTokenError());
-
-    const api = new KoyebApi(token, undefined, filter.host);
+    const { token, client: api } = resolveClient(filter);
     const models = await api.listInstanceSnapshots(
       omitUndefined({
         type: filter.type ? API_SNAPSHOT_TYPES[filter.type] : undefined,
@@ -170,121 +166,6 @@ export class Snapshot {
       ...(this.sandbox_secret !== undefined ? { sandbox_secret: this.sandbox_secret } : {}),
       ...options,
     });
-  }
-}
-
-export type TemplateOptions = Partial<{
-  workdir: string;
-  api_token: string;
-  host: string;
-  delete_builder: boolean;
-}>;
-
-/**
- * Fluent builder that turns a recipe (files, local copies, commands) into a
- * snapshot: it runs the recipe on a throwaway builder sandbox and snapshots
- * the result, ready to spawn pre-configured sandboxes from.
- */
-export class DeclarativeSnapshot {
-  private readonly files = new Map<string, string>();
-  private readonly copies: Array<[string, string]> = [];
-  private readonly commands: Array<{ command: string; cwd?: string }> = [];
-  private readonly operations: string[] = [];
-  private builder?: Sandbox;
-
-  constructor(
-    private readonly name: string,
-    private readonly image: string,
-    private readonly options: TemplateOptions = {},
-  ) {
-    if (!(options.api_token ?? getEnv('KOYEB_API_TOKEN'))) {
-      throw new MissingApiTokenError();
-    }
-  }
-
-  file(path: string, content: string): this {
-    this.files.set(path, content);
-    return this;
-  }
-
-  copy(src: string, dst: string): this {
-    this.copies.push([src, dst]);
-    return this;
-  }
-
-  run(command: string, cwd?: string): this {
-    this.commands.push({ command, cwd });
-    return this;
-  }
-
-  async build(snapshotName?: string): Promise<Snapshot> {
-    this.builder = await Sandbox.create({
-      image: this.image,
-      name: `builder-${this.name}`,
-      ...(this.options.api_token !== undefined ? { api_token: this.options.api_token } : {}),
-      ...(this.options.host !== undefined ? { host: this.options.host } : {}),
-    });
-
-    try {
-      if (this.options.workdir) {
-        this.operations.push(`set_workdir: ${this.options.workdir}`);
-        await this.builder.filesystem.mkdir(this.options.workdir);
-      }
-
-      for (const [path, content] of this.files) {
-        this.operations.push(`create_file: ${path}`);
-        await this.builder.filesystem.write_file(path, content);
-      }
-
-      for (const [src, dst] of this.copies) {
-        this.operations.push(`copy: ${src} -> ${dst}`);
-        await this.copyLocal(src, dst);
-      }
-
-      for (const { command, cwd } of this.commands) {
-        const cmd = cwd ? `cd ${cwd} && ${command}` : command;
-        this.operations.push(`run: ${cmd}`);
-
-        // Recipe commands can install packages; give them Python's 300s budget.
-        const result = await this.builder.exec(cmd, { timeout: 300 });
-        if (result.code !== 0) {
-          throw new SandboxError(`Command failed: ${cmd}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
-        }
-      }
-
-      const snapshot = await this.builder.snapshot(snapshotName ?? this.name, {
-        snapshot_type: 'FILESYSTEM',
-        wait_available: true,
-      });
-      snapshot.operations.push(...this.operations);
-
-      return snapshot;
-    } finally {
-      if (this.options.delete_builder !== false && this.builder) {
-        await this.builder.delete().catch(() => {
-          // best-effort teardown; keep the failure that matters
-        });
-      }
-    }
-  }
-
-  private async copyLocal(src: string, dst: string): Promise<void> {
-    const fs = await import('node:fs/promises');
-    const stat = await fs.stat(src);
-
-    if (stat.isFile()) {
-      await this.builder!.filesystem.write_file(dst, await fs.readFile(src, 'utf8'));
-      return;
-    }
-
-    for (const entry of await fs.readdir(src, { withFileTypes: true })) {
-      const target = `${dst}/${entry.name}`;
-      // Python creates each subdirectory before writing into it.
-      if (entry.isDirectory()) {
-        await this.builder!.filesystem.mkdir(target);
-      }
-      await this.copyLocal(join(src, entry.name), target);
-    }
   }
 }
 

@@ -22,7 +22,8 @@ import {
 } from './errors.js';
 import { Sandbox } from './sandbox.js';
 import { completeEvent, sseResponse } from './test-support.js';
-import { buildDefinition, shellQuote } from './utils.js';
+import { buildDefinition } from './definition.js';
+import { shellQuote } from './shell.js';
 
 const APP_ID = '11111111-1111-4111-8111-111111111111';
 const SERVICE_ID = '22222222-2222-4222-8222-222222222222';

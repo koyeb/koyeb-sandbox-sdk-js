@@ -1,6 +1,5 @@
-import { Sandbox } from './sandbox.js';
 import { SandboxFileExistsError, SandboxFileNotFoundError, SandboxFilesystemError } from './errors.js';
-import { shellQuote } from './utils.js';
+import { shellQuote } from './shell.js';
 
 type FileInfo = {
   content: string;
@@ -39,8 +38,14 @@ function checkExecutorError(response: { error?: unknown }, path: string, what: s
   throw new SandboxFilesystemError(`${what} failed: ${error} (path: ${path})`);
 }
 
+/** The two transport calls filesystem operations need; Sandbox satisfies it structurally. */
+type SandboxPort = {
+  exec: (cmd: string, options?: { cwd?: string; env?: Record<string, string> }) => Promise<{ stdout: string; stderr: string; code: number }>;
+  request: (path: string, init: RequestInit, body?: unknown) => Promise<any>;
+};
+
 export class SandboxFilesystem {
-  constructor(private readonly sandbox: Sandbox) {}
+  constructor(private readonly sandbox: SandboxPort) {}
 
   async mkdir(path: string, recursive = false): Promise<void> {
     checkExecutorError(await this.sandbox.request('/make_dir', { method: 'POST' }, { path, recursive }), path, 'mkdir');

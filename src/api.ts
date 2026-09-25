@@ -1,7 +1,8 @@
 import * as koyeb from '@koyeb/api-client-js';
 import { DEFAULT_API_HOST, DEFAULT_CLAIM_ATTEMPTS, DEFAULT_CLAIM_RETRY_DELAY_MS } from './constants.js';
 import { formatRequest, formatResponse } from './format.js';
-import { assert, getEnv, wait } from './utils.js';
+import { assert, getEnv } from './prelude.js';
+import { wait } from './time.js';
 import { SandboxApiError, ServicePoolError } from './errors.js';
 
 export type { koyeb };

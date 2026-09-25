@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { koyeb, KoyebApi } from './api.js';
 import { DEFAULT_CLAIM_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT } from './constants.js';
 import { MissingApiTokenError, PoolClaimError, ServiceTerminalStateError } from './errors.js';
-import { assert, getEnv, omitUndefined, waitFor } from './utils.js';
+import { assert, getEnv, omitUndefined } from './prelude.js';
+import { waitFor } from './time.js';
 
 /**
  * Options for claiming a sandbox from a pool.

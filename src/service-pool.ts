@@ -8,8 +8,8 @@ import {
 import { MissingApiTokenError, ServicePoolError } from './errors.js';
 import type { ConfigFile, EnvValue } from './sandbox.js';
 import type { ListClaimsOptions } from './claim.js';
-import { assert, buildDefinition, getEnv, omitUndefined } from './utils.js';
-import type { DefinitionOptions } from './utils.js';
+import { assert, getEnv, omitUndefined } from './prelude.js';
+import { buildDefinition, type DefinitionOptions } from './definition.js';
 
 /**
  * Options for creating a service pool. Shares definition fields with

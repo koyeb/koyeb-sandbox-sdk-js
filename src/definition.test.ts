@@ -1,11 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildConfigFiles,
+  buildDefinition,
   buildEnvVars,
   DEFAULT_CONFIG_FILE_PERMISSIONS,
   renderEnvValue,
-} from './utils.js';
+} from './definition.js';
 
 describe('renderEnvValue', () => {
   it('passes strings through verbatim for server-side interpolation', () => {
@@ -49,3 +50,39 @@ describe('buildConfigFiles', () => {
     ]);
   });
 });
+
+describe('buildDefinition region resolution', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('reads KOYEB_REGION when opts.region is unset', () => {
+    vi.stubEnv('KOYEB_REGION', 'fra');
+    const { definition } = buildDefinition({ name: 'pool', image: 'koyeb/sandbox:slim' });
+    expect(definition.regions).toEqual(['fra']);
+  });
+
+  it('prefers opts.region over KOYEB_REGION', () => {
+    vi.stubEnv('KOYEB_REGION', 'fra');
+    const { definition } = buildDefinition({
+      name: 'pool',
+      image: 'koyeb/sandbox:slim',
+      region: 'par',
+    });
+    expect(definition.regions).toEqual(['par']);
+  });
+
+  it('falls back to the default region when neither is set', () => {
+    const saved = process.env.KOYEB_REGION;
+    delete process.env.KOYEB_REGION;
+    try {
+      const { definition } = buildDefinition({ name: 'pool', image: 'koyeb/sandbox:slim' });
+      expect(definition.regions).toEqual(['na']);
+    } finally {
+      if (saved !== undefined) {
+        process.env.KOYEB_REGION = saved;
+      }
+    }
+  });
+});
+

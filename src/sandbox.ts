@@ -34,42 +34,14 @@ import {
 } from './snapshot.js';
 import { handleServerSentEvents } from './server-sent-event.js';
 import { TypedEventTarget } from './typed-event-target.js';
-import {
-  assert,
-  buildConfigFiles,
-  buildEnvVars,
-  buildNetworkPolicy,
-  Duration,
-  getEnv,
-  isDefined,
-  isUndefined,
-  omitUndefined,
-  parseDuration,
-  randomString,
-  waitFor,
-  wait,
-  buildDefinition,
-} from './utils.js';
+import { buildNetworkPolicy } from './cidr.js';
+import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
+import { type Duration, parseDuration } from './duration.js';
+import { assert, getEnv, isDefined, isUndefined, omitUndefined } from './prelude.js';
+import { wait, waitFor } from './time.js';
 
-/**
- * Reference to a Koyeb secret by name. A full `koyeb.Secret` object also satisfies this
- * structurally (its `name` field is read at render time).
- */
-export type SecretRef = { name?: string };
-
-/**
- * A value usable in `env` or `config_files`.
- *
- * - `string`: passed verbatim. Server-side interpolation (`{{ X }}` and `{{ secret.foo }}`) still applies.
- * - `SecretRef` (e.g. `{ name: "my-secret" }` or a full `koyeb.Secret`): rendered as
- *   `"{{ secret.<name> }}"`.
- */
-export type EnvValue = string | SecretRef;
-
-/**
- * Config file with custom permissions. `content` accepts the same forms as env values.
- */
-export type ConfigFile = { content: EnvValue; permissions?: string };
+// Value types live with the definition module; re-exported for the public surface.
+export type { ConfigFile, EnvValue, SecretRef } from './definition.js';
 
 export type CreateSandboxOptions = Partial<{
   image: string;

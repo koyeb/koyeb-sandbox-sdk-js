@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseDuration } from './utils.js';
+import { parseDuration } from './duration.js';
 
 describe('parseDuration', () => {
   it('passes numbers and undefined through', () => {

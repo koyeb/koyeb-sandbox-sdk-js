@@ -4,7 +4,8 @@ import { koyeb, KoyebApi } from './api.js';
 import { DEFAULT_SNAPSHOT_POLL_INTERVAL, DEFAULT_SNAPSHOT_WAIT_TIMEOUT } from './constants.js';
 import { MissingApiTokenError, SandboxError, SandboxTimeoutError } from './errors.js';
 import { Sandbox } from './sandbox.js';
-import { assert, getEnv, omitUndefined, waitFor } from './utils.js';
+import { assert, getEnv, omitUndefined } from './prelude.js';
+import { waitFor } from './time.js';
 
 export type SnapshotType = 'FILESYSTEM' | 'FULL';
 export type SnapshotStatus = 'INVALID' | 'CREATING' | 'AVAILABLE' | 'ERROR' | 'DELETING' | 'DELETED';

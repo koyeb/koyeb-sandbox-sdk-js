@@ -1,41 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { buildDefinition, waitFor } from './utils.js';
-
-describe('buildDefinition region resolution', () => {
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
-  it('reads KOYEB_REGION when opts.region is unset', () => {
-    vi.stubEnv('KOYEB_REGION', 'fra');
-    const { definition } = buildDefinition({ name: 'pool', image: 'koyeb/sandbox:slim' });
-    expect(definition.regions).toEqual(['fra']);
-  });
-
-  it('prefers opts.region over KOYEB_REGION', () => {
-    vi.stubEnv('KOYEB_REGION', 'fra');
-    const { definition } = buildDefinition({
-      name: 'pool',
-      image: 'koyeb/sandbox:slim',
-      region: 'par',
-    });
-    expect(definition.regions).toEqual(['par']);
-  });
-
-  it('falls back to the default region when neither is set', () => {
-    const saved = process.env.KOYEB_REGION;
-    delete process.env.KOYEB_REGION;
-    try {
-      const { definition } = buildDefinition({ name: 'pool', image: 'koyeb/sandbox:slim' });
-      expect(definition.regions).toEqual(['na']);
-    } finally {
-      if (saved !== undefined) {
-        process.env.KOYEB_REGION = saved;
-      }
-    }
-  });
-});
+import { waitFor } from './time.js';
 
 describe('waitFor backoff', () => {
   afterEach(() => {

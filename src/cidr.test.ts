@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { EgressPolicyError } from './errors.js';
-import { buildNetworkPolicy } from './utils.js';
+import { buildNetworkPolicy } from './cidr.js';
 
 describe('buildNetworkPolicy', () => {
   it('returns undefined when neither argument is set', () => {

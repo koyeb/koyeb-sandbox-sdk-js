@@ -1,6 +1,6 @@
 import { Sandbox } from './sandbox.js';
 import { SandboxFileExistsError, SandboxFileNotFoundError, SandboxFilesystemError } from './errors.js';
-import { shellQuote } from './utils.js';
+import { shellQuote } from './shell.js';
 
 type FileInfo = {
   content: string;

@@ -2,7 +2,7 @@ import * as koyeb from '@koyeb/api-client-js';
 import { DEFAULT_API_HOST, DEFAULT_CLAIM_ATTEMPTS, DEFAULT_CLAIM_RETRY_DELAY_MS } from './constants.js';
 import { formatRequest, formatResponse } from './format.js';
 import { assert, getEnv, wait } from './utils.js';
-import { ServicePoolError } from './errors.js';
+import { SandboxApiError, ServicePoolError } from './errors.js';
 
 export type { koyeb };
 
@@ -20,17 +20,19 @@ export class KoyebApi {
   constructor(
     private readonly token?: string,
     private readonly debug = process.env.KOYEB_DEBUG === 'true',
+    host?: string,
   ) {
-    this.baseUrl = getEnv('KOYEB_API_HOST') ?? DEFAULT_API_HOST;
+    this.baseUrl = host ?? getEnv('KOYEB_API_HOST') ?? DEFAULT_API_HOST;
   }
 
-  private async api<T extends { error: Error } | { data: unknown }>(
+  private async api<T extends { error: unknown } | { data: unknown }>(
     promise: Promise<T>,
   ): Promise<T extends { data: infer R } ? R : never> {
     const result = await promise;
 
     if ('error' in result) {
-      throw result.error;
+      const response = (result as { response?: Response }).response;
+      throw new SandboxApiError(response?.status ?? 0, result.error);
     }
 
     return result.data as any;
@@ -79,6 +81,12 @@ export class KoyebApi {
   async listServices(query: Query<'listServices'>) {
     const response = await this.api(koyeb.listServices({ ...this.params, query }));
     return response!.services!;
+  }
+
+  /** Full list reply with the total count, for paginating over every service. */
+  async listServicesPage(query: Query<'listServices'>) {
+    const response = await this.api(koyeb.listServices({ ...this.params, query }));
+    return { services: response!.services ?? [], count: response!.count ?? 0 };
   }
 
   async getService(id: string) {
@@ -181,6 +189,36 @@ export class KoyebApi {
   async listClaims(poolId: string, query?: Query<'listClaim'>) {
     const response = await this.api(koyeb.listClaim({ ...this.params, path: { pool_id: poolId }, query }));
     return response!.claims ?? [];
+  }
+
+  async listDeployments(query?: Query<'listDeployments'>) {
+    const response = await this.api(koyeb.listDeployments({ ...this.params, query }));
+    return response!.deployments ?? [];
+  }
+
+  async listInstances(query?: Query<'listInstances'>) {
+    const response = await this.api(koyeb.listInstances({ ...this.params, query }));
+    return response!.instances ?? [];
+  }
+
+  async createInstanceSnapshot(body: Body<'createInstanceSnapshot'>) {
+    const response = await this.api(koyeb.createInstanceSnapshot({ ...this.params, body }));
+    return response!.instance_snapshot!;
+  }
+
+  async getInstanceSnapshot(id: string) {
+    const response = await this.api(koyeb.getInstanceSnapshot({ ...this.params, path: { id } }));
+    return response!.instance_snapshot!;
+  }
+
+  async listInstanceSnapshots(query?: Query<'listInstanceSnapshots'>) {
+    const response = await this.api(koyeb.listInstanceSnapshots({ ...this.params, query }));
+    return response!.instance_snapshots ?? [];
+  }
+
+  async deleteInstanceSnapshot(id: string) {
+    const response = await this.api(koyeb.deleteInstanceSnapshot({ ...this.params, path: { id } }));
+    return response!.instance_snapshot!;
   }
 }
 

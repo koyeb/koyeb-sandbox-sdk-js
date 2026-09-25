@@ -74,10 +74,16 @@ Creates a new sandbox.
 | `_experimental_enable_light_sleep` | When enabled, uses idle_timeout for light_sleep and sets deep_sleep=3900.                                                           |
 | `block_network`                    | Block all outbound network access. Mutually exclusive with `outbound_allowlist`.                                                    |
 | `outbound_allowlist`               | IPs/CIDRs allowed as outbound destinations; all other traffic is blocked. Bare IPs are normalized to `/32` (IPv4) or `/128` (IPv6). |
+| `poll_interval`                    | Seconds between readiness polls (defaults to `0.5`).                                                                                |
+| `cleanup_on_failure`               | Best-effort delete of the sandbox when readiness fails (default `true`). Pass `false` to keep a failed sandbox for inspection.       |
 
-### `Sandbox.get_from_id(serviceId, apiToken?)`
+### `Sandbox.get_from_id(serviceId, apiToken?, host?)`
 
 Load an existing Sandbox from a Koyeb service ID. Useful for long-lived integrations.
+
+### `Sandbox.list(options?)`
+
+List every sandbox service as lazy handles: `options` accepts `app_id` and `name` filters plus `api_token` and `host` overrides. Handles carry no executor secret — connected operations (commands, filesystem) raise `NoSandboxSecretError`, while health checks keep polling to their timeout; reconnect with `Sandbox.get_from_id(handle.id)`.
 
 ## Claiming Sandboxes from a Pool
 
@@ -225,8 +231,10 @@ await pool.delete();
 
 | Method                       | Description                                                                                            |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `exec(cmd, options?)`        | Runs a command and resolves with `{ stdout, stderr, code }`. Supports `cwd`, `env`, and `AbortSignal`. |
-| `exec_stream(cmd, options?)` | Streams command output using Server-Sent Events. Emits `stdout`, `stderr`, and `end`.                  |
+| `exec(cmd, options?)`        | Runs a command and resolves with `{ stdout, stderr, code }`.                                                                           |
+| `exec_stream(cmd, options?)` | Streams command output using Server-Sent Events. Emits `stdout`, `stderr`, `exit`, and `end`.          |
+
+`exec` options: `cwd`, `env`, `timeout` (seconds, default `30`), `on_stdout`/`on_stderr` (streaming callbacks; when set, output is no longer buffered), `stream` (default `true` consumes Server-Sent Events, `false` buffers server-side), `raise_on_error` (default `false`; when `true`, a non-zero exit raises `SandboxCommandError`), and `signal` (`AbortSignal`).
 
 ### Streaming Example
 
@@ -249,6 +257,8 @@ stream.addEventListener('end', () => {
   console.log('Command finished');
 });
 ```
+
+For callback-based streaming without event listeners, `exec` accepts `on_stdout`/`on_stderr` directly.
 
 ## Port Exposure
 
@@ -279,6 +289,8 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 | `write_files(files)`                   | Bulk write helper for multiple files.                 |
 | `read_file(path)`                      | Fetch `{ content, encoding }` for a remote file.      |
 | `rename_file(oldPath, newPath)`        | Rename using an internal `mv` command.                |
+| `move_file(src, dst)`                   | Move a file; maps `NO_SUCH_FILE` to `SandboxFileNotFoundError`. |
+| `delete_file(path)`                     | Delete a single file via the executor endpoint.       |
 | `rm(path, recursive?)`                 | Remove a file or directory (`rm -rf` when recursive). |
 | `exists(path)`                         | Return `true` if the path exists.                     |
 | `is_file(path)`                        | Return `true` if the path is a regular file.          |
@@ -286,19 +298,60 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 | `upload_file(localPath, remotePath)`   | Read a local file and upload it.                      |
 | `download_file(localPath, remotePath)` | Download a sandbox file to disk.                      |
 
+## Snapshots
+
+Snapshots capture a sandbox's filesystem (or full state) so new sandboxes boot pre-configured.
+
+```ts
+// Snapshot a running sandbox
+const snapshot = await sandbox.snapshot('my-snapshot');
+
+// Boot a new sandbox from it
+const clone = await Snapshot.get('my-snapshot').then((s) => s.spawn('clone'));
+
+// Or inline at creation time
+const other = await Sandbox.create({ snapshot: 'my-snapshot', name: 'sbx' });
+```
+
+- `sandbox.snapshot(name, options?)` — snapshot the first running instance; waits for availability by default (`snapshot_type: 'FULL'` captures full state).
+- `Snapshot.get(id)` / `Snapshot.list({ type, status, name, limit, offset })` — fetch snapshots.
+- `snapshot.refresh()` / `snapshot.wait_available(timeout?, pollInterval?)` / `snapshot.delete()`.
+- `snapshot.spawn(name?, options?)` — boot a new sandbox from the snapshot.
+- `Sandbox.create({ snapshot, ... })` — create with `instance_snapshot_id`; a `FULL` snapshot omits the definition (the API infers it).
+
+## Templates
+
+Build a snapshot from a declarative recipe: the SDK runs your files and commands on a throwaway builder sandbox, snapshots the result, and tears the builder down.
+
+```ts
+const snapshot = await Sandbox.template('python-ci', 'python:3.12', { workdir: '/workspace' })
+  .file('requirements.txt', 'pytest\nrequests')
+  .copy('./local-dir', '/workspace/dir')
+  .run('pip install -r requirements.txt')
+  .build();
+
+const sandbox = await snapshot.spawn('runner');
+```
+
 ## Error Types
 
-The SDK exports the following error classes for granular handling:
+The SDK exports the following error classes for granular handling. Every one of them extends `SandboxError`, so a single `catch` covers the whole SDK — including API failures.
 
+- `SandboxError` — base class for every SDK failure
 - `MissingApiTokenError`
 - `InvalidPortError`
 - `SandboxTimeoutError`
 - `NoSandboxSecretError`
-- `SandboxRequestError`
+- `SandboxRequestError` — executor non-OK responses (carries `status_code` + `body`)
+- `SandboxApiError` — non-2xx API responses (carries `status` + `body`)
+- `SandboxServiceError` — executor 5xx responses after the retry budget (extends `SandboxRequestError`)
+- `SandboxCommandError` — a command exited non-zero while `raise_on_error` was opted in (carries the command `result`)
+- `SandboxDeploymentError` — the sandbox deployment reached a terminal error state
 - `EgressPolicyError`
 - `PoolClaimError`
 - `ServiceTerminalStateError`
 - `ServicePoolError`
+- `SandboxFilesystemError` (+ `SandboxFileNotFoundError`, `SandboxFileExistsError`)
 
 ## Contributing
 

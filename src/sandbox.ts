@@ -1,8 +1,6 @@
 import { koyeb, KoyebApi } from './api.js';
 import {
   DEFAULT_COMMAND_TIMEOUT,
-  DEFAULT_EXECUTOR_RETRIES,
-  DEFAULT_EXECUTOR_RETRY_DELAY_MS,
   DEFAULT_IDLE_TIMEOUT,
   DEFAULT_INSTANCE_WAIT_TIMEOUT,
   DEFAULT_POLL_INTERVAL,
@@ -35,6 +33,7 @@ import { handleServerSentEvents } from './server-sent-event.js';
 import { TypedEventTarget } from './typed-event-target.js';
 import { buildNetworkPolicy } from './cidr.js';
 import { resolveClient } from './credentials.js';
+import { ExecutorGateway } from './executor-gateway.js';
 import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
 import { type Duration, parseDuration } from './duration.js';
 import { assert, isDefined, isUndefined, omitUndefined } from './prelude.js';
@@ -162,7 +161,12 @@ export class Sandbox {
     private readonly poll_interval: number = DEFAULT_POLL_INTERVAL,
   ) {
     this.api = new KoyebApi(this.api_token, undefined, this.host);
+    // Transport policy rides on this class's authorized fetch, so the seam
+    // tests already mock stays the seam.
+    this.gateway = new ExecutorGateway((path, init, body) => this.fetch(path, init, body));
   }
+
+  private readonly gateway: ExecutorGateway;
 
   get id(): string {
     return this.service_id;
@@ -491,21 +495,9 @@ export class Sandbox {
   }
 
   private async executor_healthy(): Promise<boolean> {
-    try {
-      const conn = await this.get_conn_info();
-      const headers: Record<string, string> = { Authorization: `Bearer ${conn.secret}` };
-
-      if (conn.routing_key) {
-        headers['X-Routing-Key'] = conn.routing_key;
-      }
-
-      // Python bounds the health probe at 5s so a wedged executor cannot stall the wait.
-      const response = await fetch(`${conn.public_url}/health`, { headers, signal: AbortSignal.timeout(5_000) });
-
-      return response.ok;
-    } catch {
-      return false;
-    }
+    // Through the transport seam like every other executor call: one header
+    // assembly, and the 5s bound lives in the gateway (Python parity).
+    return this.gateway.health();
   }
 
   async get_tcp_proxy_info(): Promise<[host: string, public_port: number] | undefined> {
@@ -779,61 +771,7 @@ export class Sandbox {
   }
 
   async request(path: string, init: RequestInit, requestBody?: unknown, hooks?: { onAttempt?: () => void }) {
-    // Transient executor unavailability (cold starts, restarts, 5xx, network
-    // blips): retry with exponential backoff before failing (Python parity).
-    let backoff = DEFAULT_EXECUTOR_RETRY_DELAY_MS;
-
-    for (let attempt = 0; ; attempt++) {
-      // Python re-arms the per-read timeout on every attempt.
-      hooks?.onAttempt?.();
-
-      let response: Response;
-
-      try {
-        response = await this.fetch(path, init, requestBody);
-      } catch (error) {
-        // Abort-driven failures are not transient; fail fast without retries.
-        if (init.signal?.aborted) {
-          throw error;
-        }
-
-        if (attempt >= DEFAULT_EXECUTOR_RETRIES) {
-          throw error instanceof SandboxError
-            ? error
-            : new SandboxError(`Request to sandbox executor failed: ${String(error)}`);
-        }
-
-        await wait(backoff, init.signal ?? undefined);
-        backoff *= 2;
-        continue;
-      }
-
-      if (response.status >= 500 && attempt < DEFAULT_EXECUTOR_RETRIES) {
-        // Free the connection before the retry and honor early aborts.
-        if (response.body) {
-          await response.body.cancel().catch(() => {});
-        }
-        await wait(backoff, init.signal ?? undefined);
-        backoff *= 2;
-        continue;
-      }
-
-      const contentType = response.headers.get('Content-Type');
-      const responseBody =
-        contentType?.startsWith('application/json') ? await response.json() : await response.text();
-
-      if (!response.ok) {
-        if (response.status >= 500) {
-          throw new SandboxServiceError(
-            response.status,
-            typeof responseBody === 'string' ? responseBody : JSON.stringify(responseBody),
-          );
-        }
-        throw new SandboxRequestError(response.status, responseBody);
-      }
-
-      return responseBody;
-    }
+    return this.gateway.post(path, init, requestBody, hooks);
   }
 
   get filesystem() {
@@ -924,15 +862,7 @@ export class Sandbox {
     const deadline = new Deadline(timeout, signal);
 
     try {
-      const response = await this.fetch('/run_streaming', { method: 'POST', signal: deadline.signal }, { cmd, cwd, env });
-
-      if (!response.ok) {
-        const body = await response.text();
-        if (response.status >= 500) {
-          throw new SandboxServiceError(response.status, body);
-        }
-        throw new SandboxRequestError(response.status, body);
-      }
+      const response = await this.gateway.raw('/run_streaming', { method: 'POST', signal: deadline.signal }, { cmd, cwd, env });
 
       assert(response.body);
       await handleServerSentEvents(emitter, response.body, () => deadline.arm());

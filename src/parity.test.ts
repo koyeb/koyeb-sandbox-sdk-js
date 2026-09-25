@@ -4,6 +4,7 @@ import { KoyebApi, koyeb } from './api.js';
 import { DEFAULT_INSTANCE_WAIT_TIMEOUT, DEFAULT_POLL_INTERVAL } from './constants.js';
 import {
   EgressPolicyError,
+  SandboxApiError,
   InvalidPortError,
   MissingApiTokenError,
   NoSandboxSecretError,
@@ -283,6 +284,147 @@ function stubControlPlane(handlers: {
   return { calls, fetch };
 }
 
+describe('update_network_policy parity (reference commit 10210e3)', () => {
+  const OLD_DEPLOYMENT = 'dep-old';
+  const NEW_DEPLOYMENT = 'dep-new';
+
+  function stubPolicyApi(overrides: {
+    updateResponse?: () => Promise<unknown>;
+    postUpdateService?: () => Promise<unknown>;
+  } = {}) {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'sec', 'token');
+    const api = (sandbox as unknown as { api: KoyebApi }).api;
+    let updated = false;
+
+    vi.spyOn(api, 'getService').mockImplementation(async () => {
+      if (!updated) {
+        return { active_deployment_id: OLD_DEPLOYMENT, latest_deployment_id: OLD_DEPLOYMENT } as never;
+      }
+      return (
+        overrides.postUpdateService
+          ? await overrides.postUpdateService()
+          : { active_deployment_id: OLD_DEPLOYMENT, latest_deployment_id: NEW_DEPLOYMENT }
+      ) as never;
+    });
+    vi.spyOn(api, 'getDeployment').mockResolvedValue({ status: 'HEALTHY' } as never);
+    vi.spyOn(api, 'updateService').mockImplementation(async () => {
+      updated = true;
+      return (
+        overrides.updateResponse ? await overrides.updateResponse() : { latest_deployment_id: NEW_DEPLOYMENT }
+      ) as never;
+    });
+
+    return { sandbox, api };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('pins the replacement deployment so wait_ready polls it, not the old active one', async () => {
+    const { sandbox, api } = stubPolicyApi();
+
+    await sandbox.update_network_policy({ block_network: true });
+    vi.mocked(api.getDeployment).mockClear();
+    await sandbox.wait_ready(0.1, 0.02);
+
+    const polled = vi.mocked(api.getDeployment).mock.calls.map((call) => call[0]);
+    expect(polled).toContain(NEW_DEPLOYMENT);
+    expect(polled).not.toContain(OLD_DEPLOYMENT);
+  });
+
+  it('falls back to a fresh service lookup when the update response has no id', async () => {
+    const { sandbox, api } = stubPolicyApi({ updateResponse: async () => ({}) });
+
+    await sandbox.update_network_policy({ block_network: true });
+    vi.mocked(api.getDeployment).mockClear();
+    await sandbox.wait_ready(0.1, 0.02);
+
+    // The fallback getService supplied the new deployment id.
+    expect(vi.mocked(api.getDeployment).mock.calls.map((call) => call[0])).toContain(NEW_DEPLOYMENT);
+  });
+
+  it('resolves the update when the id lookup fails, resetting the pin', async () => {
+    const { sandbox, api } = stubPolicyApi({
+      updateResponse: async () => ({}),
+      postUpdateService: async () => {
+        throw new Error('lookup blew up after the update');
+      },
+    });
+    const getServiceCallsAfterUpdate = () => vi.mocked(api.getService).mock.calls.length;
+
+    await expect(sandbox.update_network_policy({ block_network: true })).resolves.toBeUndefined();
+    // The fallback lookup was attempted (and swallowed) after the update.
+    expect(getServiceCallsAfterUpdate()).toBeGreaterThan(1);
+
+    // No pin: readiness resolves from the live service as before.
+    await sandbox.wait_ready(0.1, 0.02);
+    expect(vi.mocked(api.getDeployment).mock.calls.map((call) => call[0])).toContain(OLD_DEPLOYMENT);
+  });
+
+  it('drops cached connection info so clients reconnect to the replacement', async () => {
+    const { sandbox, api } = stubPolicyApi();
+    vi.spyOn(api, 'getApp').mockResolvedValue({ domains: [{ name: 'old.example.org' }] } as never);
+
+    const before = await sandbox.get_domain();
+    expect(before).toContain('old.example.org');
+
+    await sandbox.update_network_policy({ block_network: true });
+    vi.mocked(api.getApp).mockResolvedValue({ domains: [{ name: 'new.example.org' }] } as never);
+
+    await expect(sandbox.get_domain()).resolves.toContain('new.example.org');
+  });
+
+  it('wraps non-SDK failures as SandboxError, SDK errors pass through', async () => {
+    const { sandbox, api } = stubPolicyApi({
+      updateResponse: async () => {
+        throw new TypeError('wire cut');
+      },
+    });
+
+    const error = await sandbox.update_network_policy({ block_network: true }).catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxError);
+    expect((error as Error).message).toContain('Failed to update network policy');
+
+    vi.mocked(api.updateService).mockRejectedValue(new SandboxApiError(409, { message: 'conflict' }));
+    const sdkError = await sandbox.update_network_policy({ block_network: true }).catch((error: unknown) => error);
+
+    expect(sdkError).toBeInstanceOf(SandboxApiError);
+  });
+
+  it('get_from_id pins the resolved deployment for later readiness polls', async () => {
+    stubControlPlane({
+      service: {
+        id: SERVICE_ID,
+        app_id: APP_ID,
+        name: 'sbx',
+        status: 'HEALTHY',
+        active_deployment_id: 'dep-a',
+        latest_deployment_id: 'dep-b',
+      } as koyeb.Service,
+    });
+
+    const sandbox = await Sandbox.get_from_id(SERVICE_ID, 'token');
+    const api = (sandbox as unknown as { api: KoyebApi }).api;
+    // The service's live deployment changes after reconnection.
+    vi.spyOn(api, 'getService').mockResolvedValue({
+      active_deployment_id: 'dep-c',
+      latest_deployment_id: 'dep-c',
+    } as never);
+    const polled: string[] = [];
+    vi.spyOn(api, 'getDeployment').mockImplementation(async (id: string) => {
+      polled.push(id);
+      return { status: 'HEALTHY' } as never;
+    });
+
+    await sandbox.wait_ready(0.1, 0.02);
+
+    expect(polled).toContain('dep-a');
+    expect(polled).not.toContain('dep-c');
+  });
+});
+
 describe('create() parity with the Python SDK', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -555,18 +697,20 @@ describe('readiness parity', () => {
 
   it('waits with the instance poll interval by default', async () => {
     const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'sec', 'token', undefined, true, 0.02);
-    const { getService } = stubDeploymentApi(sandbox, () => 'STARTING');
+    const { getService, getDeployment } = stubDeploymentApi(sandbox, () => 'STARTING');
 
     await expect(sandbox.wait_ready(0.12)).resolves.toBe(false);
 
-    // 0.02s polls fit ~6 checks in the budget; the 0.5s default manages 2.
-    expect(getService.mock.calls.length).toBeGreaterThan(4);
+    // 0.02s polls fit ~6 deployment checks in the budget; the 0.5s default manages 2.
+    expect(getDeployment.mock.calls.length).toBeGreaterThan(4);
+    // The deployment id resolves once and is cached, like Python's _resolve_deployment_id.
+    expect(getService.mock.calls.length).toBe(1);
   });
 
   it('latches deployment health, then polls only the executor, like Python', async () => {
     const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'sec', 'token', undefined, true, 0.02);
     let polls = 0;
-    const { getService } = stubDeploymentApi(sandbox, () => (++polls < 3 ? 'STARTING' : 'HEALTHY'));
+    const { getDeployment } = stubDeploymentApi(sandbox, () => (++polls < 3 ? 'STARTING' : 'HEALTHY'));
     vi.spyOn(sandbox, 'get_conn_info').mockResolvedValue({
       public_url: 'https://sbx.example.org',
       secret: 'sec',
@@ -576,8 +720,8 @@ describe('readiness parity', () => {
 
     await expect(sandbox.wait_ready(0.3, 0.02)).resolves.toBe(false);
 
-    // The deployment is fetched only until first healthy; the executor polls on.
-    expect(getService.mock.calls.length).toBe(3);
+    // The deployment is polled only until first healthy; the executor polls on.
+    expect(getDeployment.mock.calls.length).toBe(3);
     expect(health.mock.calls.length).toBeGreaterThan(4);
   });
 

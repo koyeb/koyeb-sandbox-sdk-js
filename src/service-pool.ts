@@ -79,23 +79,9 @@ export class ServicePool {
       throw new MissingApiTokenError();
     }
 
-    const { definition } = buildDefinition({
-      name,
-      type: options.type,
-      image: options.image,
-      instance_type: options.instance_type,
-      region: options.region,
-      env: options.env,
-      config_files: options.config_files,
-      privileged: options.privileged,
-      registry_secret: options.registry_secret,
-      exposed_port_protocol: options.exposed_port_protocol,
-      enable_tcp_proxy: options.enable_tcp_proxy,
-      idle_timeout: options.idle_timeout,
-      _experimental_enable_light_sleep: options._experimental_enable_light_sleep,
-      block_network: options.block_network,
-      outbound_allowlist: options.outbound_allowlist,
-    });
+    // Options are a DefinitionOptions superset: thread them whole so no
+    // accepted field can be silently dropped by hand-maintaining this list.
+    const { definition } = buildDefinition({ ...options, name });
 
     const api = new KoyebApi(token);
     const pool = await api.createServicePool(

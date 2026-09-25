@@ -12,23 +12,17 @@ if (!apiToken) {
 
 const suffix = Math.random().toString(36).slice(2, 10);
 
-// Python asyncio echo server, run inside the sandbox.
+// JS echo server, run inside the sandbox (the image ships Node LTS).
 const WS_SERVER_SCRIPT = String.raw`
-import asyncio
-import websockets
-import json
+const { WebSocketServer } = require('ws');
 
-async def handler(ws):
-    async for message in ws:
-        data = json.loads(message)
-        response = {"echo": data, "server": "sandbox"}
-        await ws.send(json.dumps(response))
+const wss = new WebSocketServer({ port: 8765 });
 
-async def main():
-    async with websockets.serve(handler, "0.0.0.0", 8765):
-        await asyncio.Future()
-
-asyncio.run(main())
+wss.on('connection', (ws) => {
+  ws.on('message', (message) => {
+    ws.send(JSON.stringify({ echo: JSON.parse(message.toString()), server: 'sandbox' }));
+  });
+});
 `;
 
 async function connect(url: string): Promise<WebSocket> {
@@ -63,15 +57,16 @@ async function main() {
   });
 
   try {
-    console.log('Installing websockets in sandbox...');
-    const install = await sandbox.exec('pip install websockets');
+    console.log('Installing ws in sandbox...');
+    const install = await sandbox.exec('cd /tmp && npm install ws --no-audit --no-fund');
     if (install.code !== 0) {
-      throw new Error(`Failed to install websockets: ${install.stderr}`);
+      throw new Error(`Failed to install ws: ${install.stderr}`);
     }
 
     console.log('Starting WebSocket server...');
-    await sandbox.filesystem.write_file('/tmp/ws_server.py', WS_SERVER_SCRIPT);
-    const processId = await sandbox.launch_process('python3 /tmp/ws_server.py');
+    await sandbox.filesystem.write_file('/tmp/ws_server.js', WS_SERVER_SCRIPT);
+    // require('ws') resolves from /tmp/node_modules next to the script.
+    const processId = await sandbox.launch_process('node /tmp/ws_server.js');
     console.log(`Server started with process ID: ${processId}`);
     await new Promise((resolve) => setTimeout(resolve, 3_000));
 

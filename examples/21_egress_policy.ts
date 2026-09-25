@@ -10,14 +10,16 @@ if (!apiToken) {
   process.exit(1);
 }
 
-// Outbound probe run inside the sandbox; fails when egress is blocked.
-const PROBE = 'python3 -c "import urllib.request; urllib.request.urlopen(\'https://example.com\', timeout=5)"';
-
 const suffix = Math.random().toString(36).slice(2, 10);
 
+// Outbound probe run inside the sandbox; fails when egress is blocked.
+// The sandbox image ships Node LTS, so the probe speaks JS.
+const probe = (url: string) =>
+  `node -e "fetch('${url}', { signal: AbortSignal.timeout(5000) }).then(() => process.exit(0)).catch(() => process.exit(1))"`;
+
+const PROBE = probe('https://example.com');
 // The allowlist probe must hit an allowed destination; example.com is not in it.
-const PROBE_ALLOWED =
-  'python3 -c "import urllib.request; urllib.request.urlopen(\'https://1.1.1.1\', timeout=5)"';
+const PROBE_ALLOWED = probe('https://1.1.1.1');
 
 let sandbox: Sandbox | undefined;
 

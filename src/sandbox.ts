@@ -19,14 +19,8 @@ import {
   SandboxTimeoutError,
 } from './errors.js';
 import { SandboxFilesystem } from './sandbox-filesystem.js';
-import {
-  DeclarativeSnapshot,
-  resolveSnapshot,
-  Snapshot,
-  type SnapshotOptions,
-  type SnapshotType,
-  type TemplateOptions,
-} from './snapshot.js';
+import { DeclarativeSnapshot, type TemplateOptions } from './declarative-snapshot.js';
+import type { Snapshot, SnapshotOptions, SnapshotType } from './snapshot.js';
 import { buildNetworkPolicy } from './cidr.js';
 import { resolveClient } from './credentials.js';
 import { CommandRunner } from './command-runner.js';
@@ -184,7 +178,10 @@ export class Sandbox {
     });
 
     const resolvedSnapshot =
-      opts.snapshot !== undefined ? await resolveSnapshot(opts.snapshot, token, opts.host) : undefined;
+      opts.snapshot !== undefined
+        ? // Deferred: the snapshot module composes Sandbox, so resolve at call time.
+          await (await import('./snapshot.js')).resolveSnapshot(opts.snapshot, token, opts.host)
+        : undefined;
     const service = await this.createService(token, opts, definition, resolvedSnapshot);
     const sandbox = new Sandbox(
       service.app_id!,
@@ -660,7 +657,7 @@ export class Sandbox {
     });
     assert(model?.id, new SandboxError('Failed to create snapshot: no snapshot returned from API'));
 
-    const snapshot = Snapshot.from_model(model, {
+    const snapshot = (await import('./snapshot.js')).Snapshot.from_model(model, {
       api_token: this.api_token,
       host: this.host,
       sandbox_secret: this.sandbox_secret,

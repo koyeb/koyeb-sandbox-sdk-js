@@ -25,10 +25,12 @@ export {
 export { ServicePool, type CreatePoolOptions, type UpdatePoolOptions, type ListPoolsOptions } from './service-pool.js';
 export {
   DeclarativeSnapshot,
+  type TemplateOptions,
+} from './declarative-snapshot.js';
+export {
   Snapshot,
   type ListSnapshotsFilter,
   type SnapshotOptions,
   type SnapshotStatus,
   type SnapshotType,
-  type TemplateOptions,
 } from './snapshot.js';

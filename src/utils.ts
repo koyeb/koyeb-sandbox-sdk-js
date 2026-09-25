@@ -345,7 +345,8 @@ export function parseDuration(input: undefined | number | string): number | unde
   }
 
   const value = Number(match[1]);
-  const unit = match[2] as 's' | 'm' | 'h' | 'd';
+  // A bare digit string means seconds; a missing unit key must not disable the delay.
+  const unit = (match[2] ?? 's') as 's' | 'm' | 'h' | 'd';
 
   return {
     s: value,

@@ -50,7 +50,7 @@ async function roundTrip(ws: WebSocket, payload: unknown): Promise<unknown> {
 
 async function main() {
   const sandbox = await Sandbox.create({
-    image: 'koyeb/sandbox:slim',
+    image: 'koyeb/sandbox',
     name: `websockets-${suffix}`,
     wait_ready: true,
     api_token: apiToken,

@@ -5,7 +5,7 @@ console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function main() {
   await sandbox.exec('mkdir -p /tmp/my_project/src');
-  await sandbox.exec(`echo 'print("hello")' > /tmp/my_project/src/main.py`);
+  await sandbox.exec(`echo "console.log('hello')" > /tmp/my_project/src/main.js`);
 
   let result = await sandbox.exec('pwd', { cwd: '/tmp/my_project' });
   console.log(result.stdout);
@@ -13,7 +13,7 @@ async function main() {
   result = await sandbox.exec('ls -la', { cwd: '/tmp/my_project' });
   console.log(result.stdout);
 
-  result = await sandbox.exec('cat src/main.py', { cwd: '/tmp/my_project' });
+  result = await sandbox.exec('cat src/main.js', { cwd: '/tmp/my_project' });
   console.log(result.stdout);
 }
 

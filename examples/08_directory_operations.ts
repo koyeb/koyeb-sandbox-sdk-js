@@ -13,12 +13,12 @@ async function main() {
 
   await fs.mkdir('/tmp/my_project/src', true);
   await fs.mkdir('/tmp/my_project/tests', true);
-  await fs.write_file('/tmp/my_project/src/main.py', "print('Hello')");
+  await fs.write_file('/tmp/my_project/src/main.js', "console.log('Hello')");
   await fs.write_file('/tmp/my_project/README.md', '# My Project');
 
   const exists = await fs.exists('/tmp/my_project');
   const isDir = await fs.is_dir('/tmp/my_project');
-  const isFile = await fs.is_file('/tmp/my_project/src/main.py');
+  const isFile = await fs.is_file('/tmp/my_project/src/main.js');
   console.log(`Exists: ${exists}, Is dir: ${isDir}, Is file: ${isFile}`);
 }
 

@@ -30,8 +30,8 @@ async function main() {
     console.log('  - Spawning runner1...');
     console.log('  - Spawning runner2...');
     [runner1, runner2] = await Promise.all([
-      snapshot.spawn(`test-suite-1-${suffix}`, { image: 'python:3.12', wait_ready: false, api_token: apiToken! }),
-      snapshot.spawn(`test-suite-2-${suffix}`, { image: 'python:3.12', wait_ready: false, api_token: apiToken! }),
+      snapshot.spawn(`test-suite-1-${suffix}`, { image: 'node:22-slim', wait_ready: false, api_token: apiToken! }),
+      snapshot.spawn(`test-suite-2-${suffix}`, { image: 'node:22-slim', wait_ready: false, api_token: apiToken! }),
     ]);
     console.log(`  ✓ Runner1 spawned: ${runner1.name}`);
     console.log(`  ✓ Runner2 spawned: ${runner2.name}`);
@@ -45,7 +45,7 @@ async function main() {
     // Both runners share the same pre-installed environment.
     console.log('✓ Verifying runners see the pre-installed packages...');
     for (const runner of [runner1, runner2]) {
-      const result = await runner.exec("python3 -c \"import requests; print('OK')\"");
+      const result = await runner.exec("node -e \"require('axios'); console.log('OK')\"", { cwd: '/workspace' });
       if (result.stdout.trim() !== 'OK') {
         throw new Error(`${runner.name} is missing the requests package: ${result.stderr}`);
       }
@@ -59,13 +59,13 @@ async function main() {
 }
 
 function buildSnapshot() {
-  return Sandbox.template(`ci-environment-${suffix}`, 'python:3.12', {
+  return Sandbox.template(`ci-environment-${suffix}`, 'node:22-slim', {
     workdir: '/workspace',
     api_token: apiToken,
   })
-    .file('requirements.txt', 'requests')
-    .run('pip install -r requirements.txt')
-    .build(`python-ci-env-${suffix}`);
+    .file('package.json', '{"name":"ci","dependencies":{"axios":"^1.7.0"}}')
+    .run('npm install', '/workspace')
+    .build(`node-ci-env-${suffix}`);
 }
 
 main().catch((error) => {

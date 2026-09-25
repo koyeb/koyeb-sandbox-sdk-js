@@ -1,6 +1,6 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
-const sandbox = await Sandbox.create({ name: 'file-ops', image: 'koyeb/sandbox:slim' });
+const sandbox = await Sandbox.create({ name: 'file-ops', image: 'koyeb/sandbox' });
 console.log(`Sandbox ID: ${sandbox.id}`);
 const fs = sandbox.filesystem;
 
@@ -11,10 +11,10 @@ async function main() {
   const fileInfo = await fs.read_file('/tmp/hello.txt');
   console.log(fileInfo.content);
 
-  const code = "#!/usr/bin/env python3\nprint('Hello from Python!')\n";
-  await fs.write_file('/tmp/script.py', code);
-  await sandbox.exec('chmod +x /tmp/script.py');
-  const result = await sandbox.exec('/tmp/script.py');
+  const code = "#!/usr/bin/env node\nconsole.log('Hello from Node!')\n";
+  await fs.write_file('/tmp/script.js', code);
+  await sandbox.exec('chmod +x /tmp/script.js');
+  const result = await sandbox.exec('/tmp/script.js');
   console.log(result.stdout);
 }
 

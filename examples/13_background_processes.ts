@@ -1,18 +1,18 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
-const sandbox = await Sandbox.create({ name: 'background-processes', image: 'koyeb/sandbox:slim' });
+const sandbox = await Sandbox.create({ name: 'background-processes', image: 'koyeb/sandbox' });
 console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function main() {
   console.log('Launching background processes...');
 
   const processId1 = await sandbox.launch_process(
-    'python3 -c \'import time; [print(f"Process 1: {i}") or time.sleep(1) for i in range(10)]\'',
+    'node -e \'let i = 0; const t = setInterval(() => { console.log("Process 1: " + ++i); if (i === 10) clearInterval(t); }, 1000)\'',
   );
   console.log(`Launched process 1: ${processId1}`);
 
   const processId2 = await sandbox.launch_process(
-    'python3 -c \'import time; [print(f"Process 2: {i}") or time.sleep(1) for i in range(5)]\'',
+    'node -e \'let i = 0; const t = setInterval(() => { console.log("Process 2: " + ++i); if (i === 5) clearInterval(t); }, 1000)\'',
   );
   console.log(`Launched process 2: ${processId2}`);
 

@@ -1,7 +1,7 @@
 /**
  * Custom entrypoint and command overrides:
  * 1. a command with args (the image default entrypoint runs it),
- * 2. a custom entrypoint running python directly.
+ * 2. a custom entrypoint running node directly.
  */
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
@@ -37,26 +37,26 @@ async function main() {
     await sandbox?.delete();
   }
 
-  // Example 2: custom entrypoint with command — the entrypoint runs python,
+  // Example 2: custom entrypoint with command — the entrypoint runs node,
   // proving the override was used.
   console.log('\n=== Example 2: custom entrypoint ===');
   try {
     sandbox = await Sandbox.create({
-      image: 'python:3.12-slim',
+      image: 'node:22-slim',
       name: `custom-entrypoint-${suffix}`,
-      entrypoint: ['python3', '-c'],
+      entrypoint: ['node', '-e'],
       command:
-        "import os; os.makedirs('/tmp', exist_ok=True); open('/tmp/started-by-python', 'w').write('yes'); import time; time.sleep(999999)",
+        "require('fs').mkdirSync('/tmp'); require('fs').writeFileSync('/tmp/started-by-node', 'yes'); setInterval(() => {}, 1_000_000)",
       api_token: apiToken,
     });
 
-    const result = await sandbox.exec('cat /tmp/started-by-python');
+    const result = await sandbox.exec('cat /tmp/started-by-node');
     const content = result.stdout.trim();
     console.log(`  Marker content: ${content}`);
     if (content !== 'yes') {
       throw new Error(`Expected 'yes', got '${content}'`);
     }
-    console.log('  OK: python3 entrypoint created the marker file');
+    console.log('  OK: node entrypoint created the marker file');
   } finally {
     await sandbox?.delete();
   }

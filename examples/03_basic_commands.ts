@@ -1,20 +1,19 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
-const sandbox = await Sandbox.create({ name: 'basic-commands', image: 'koyeb/sandbox:slim' });
+const sandbox = await Sandbox.create({ name: 'basic-commands', image: 'koyeb/sandbox' });
 console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function main() {
   let result = await sandbox.exec("echo 'Sandbox is ready!'");
   console.log(result.stdout);
 
-  result = await sandbox.exec("python3 -c 'print(2 + 2)'");
+  result = await sandbox.exec("node -e 'console.log(2 + 2)'");
   console.log(result.stdout);
 
   result = await sandbox.exec(
-    `python3 -c "
-import sys
-print(f'Python version: {sys.version.split()[0]}')
-print(f'Platform: {sys.platform}')
+    `node -e "
+console.log('Node version: ' + process.version);
+console.log('Platform: ' + process.platform);
 "`,
   );
   console.log(result.stdout);

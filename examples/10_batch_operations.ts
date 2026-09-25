@@ -19,8 +19,8 @@ async function main() {
   console.log(`Files: ${batchFiles.join(', ')}`);
 
   const projectFiles = [
-    { path: '/tmp/project/main.py', content: "print('Hello')" },
-    { path: '/tmp/project/utils.py', content: 'def helper(): pass' },
+    { path: '/tmp/project/main.js', content: "console.log('Hello')" },
+    { path: '/tmp/project/utils.js', content: 'function helper() {}' },
     { path: '/tmp/project/README.md', content: '# My Project' },
   ];
 

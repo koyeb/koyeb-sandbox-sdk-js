@@ -19,7 +19,7 @@ async function main() {
   try {
     console.log('✓ Creating sandbox...');
     sbx = await Sandbox.create({
-      image: 'python:3.12',
+      image: 'node:22-slim',
       name: `snapshot-and-spawn-${suffix}`,
       wait_ready: true,
       api_token: apiToken,
@@ -34,17 +34,17 @@ async function main() {
     console.log('  ✓ Files created');
 
     console.log('✓ Installing packages...');
-    await sbx.exec('pip3 install pytest requests');
+    await sbx.exec('cd /workspace && npm install axios');
     console.log('  ✓ Packages installed');
 
     console.log('✓ Creating snapshot...');
-    snapshot = await sbx.snapshot(`python-with-deps-${suffix}`, { snapshot_type: 'FILESYSTEM' });
+    snapshot = await sbx.snapshot(`node-with-deps-${suffix}`, { snapshot_type: 'FILESYSTEM' });
     console.log(`  ✓ Snapshot created: ${snapshot.name}`);
 
     // Spawn with a different instance type and some env.
     console.log('✓ Spawning sandbox from snapshot with different instance type...');
     sbx2 = await snapshot.spawn(`test-runner-${suffix}`, {
-      image: 'python:3.12',
+      image: 'node:22-slim',
       instance_type: 'nano',
       env: { SPAWNED_FROM_SNAPSHOT: 'true' },
       wait_ready: false,
@@ -63,7 +63,7 @@ async function main() {
     }
     console.log('  ✓ Custom file preserved');
 
-    const imported = await sbx2.exec("python3 -c \"import requests; print('OK')\"");
+    const imported = await sbx2.exec("node -e \"require('axios'); console.log('OK')\"", { cwd: '/workspace' });
     if (imported.stdout.trim() !== 'OK') {
       throw new Error(`Package not pre-installed: ${imported.stdout}`);
     }

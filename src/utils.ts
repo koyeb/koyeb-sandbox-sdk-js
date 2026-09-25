@@ -281,8 +281,12 @@ export async function waitFor(
   timeout: number,
   interval: number,
   signal?: AbortSignal,
+  startInterval?: number,
 ) {
   const start = Date.now();
+  // Exponential warm-up (Python parity): the first seconds of readiness matter
+  // most, so delays double from startInterval until reaching the steady interval.
+  let delay = Math.min(startInterval ?? interval, interval);
 
   do {
     // An already-aborted signal never fires wait()'s listener: stop up front.
@@ -294,7 +298,8 @@ export async function waitFor(
       return true;
     }
 
-    await wait(interval * 1_000, signal);
+    await wait(delay * 1_000, signal);
+    delay = Math.min(interval, delay * 2);
   } while (Date.now() - start < timeout * 1_000);
 
   return false;
@@ -315,6 +320,16 @@ export function nanoId(alphabet: string) {
 }
 
 export const randomString = nanoId('-_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz');
+
+/**
+ * Quote a value for safe interpolation into a shell command, mirroring
+ * Python's shlex.quote. Everything the executor receives through exec
+ * fallbacks (rm, mv, test) goes through this first: user-controlled paths
+ * must never be able to inject shell syntax.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
 
 export type Duration = number | `${number}${'s' | 'm' | 'h' | 'd'}`;
 
@@ -357,8 +372,19 @@ export type DefinitionOptions = Partial<{
   enable_tcp_proxy: boolean;
   idle_timeout: number;
   _experimental_enable_light_sleep: boolean;
+  _experimental_deep_sleep_value: number;
   block_network: boolean;
   outbound_allowlist: string[];
+  /** Override the image entrypoint (Python-SDK parity). */
+  entrypoint: string[];
+  /** Override the image command (Python-SDK parity). */
+  command: string;
+  /** Arguments passed to the command (Python-SDK parity). */
+  args: string[];
+  /** tri-state mesh toggle: unset = platform default (AUTO), true = ENABLED, false = DISABLED. */
+  enable_mesh: boolean;
+  /** Use an explicit sandbox secret instead of generating one. */
+  sandbox_secret: string;
 }>;
 
 /**
@@ -379,6 +405,9 @@ export function buildDefinition(opts: DefinitionOptions): {
       image: opts.image,
       privileged: opts.privileged,
       image_registry_secret: opts.registry_secret,
+      entrypoint: opts.entrypoint,
+      command: opts.command,
+      args: opts.args,
     },
     instance_types: [{ type: opts.instance_type }],
     regions: [opts.region ?? getEnv('KOYEB_REGION') ?? 'na'],
@@ -392,7 +421,7 @@ export function buildDefinition(opts: DefinitionOptions): {
     ],
   };
 
-  const sandbox_secret = randomString(32);
+  const sandbox_secret = opts.sandbox_secret ?? randomString(32);
 
   definition.env = [{ key: 'SANDBOX_SECRET', value: sandbox_secret }, ...buildEnvVars(opts.env)];
 
@@ -405,13 +434,22 @@ export function buildDefinition(opts: DefinitionOptions): {
     definition.network_policy = network_policy;
   }
 
+  // Tri-state mesh mapping: the field is always sent, unset meaning AUTO
+  // (the Python SDK's explicit platform default).
+  definition.mesh =
+    opts.enable_mesh === undefined
+      ? 'DEPLOYMENT_MESH_AUTO'
+      : opts.enable_mesh
+        ? 'DEPLOYMENT_MESH_ENABLED'
+        : 'DEPLOYMENT_MESH_DISABLED';
+
   const idle_timeout = opts.idle_timeout ?? DEFAULT_IDLE_TIMEOUT;
 
   if (idle_timeout > 0) {
     let sleep_idle_delay: koyeb.DeploymentScalingTargetSleepIdleDelay;
 
     if (opts._experimental_enable_light_sleep) {
-      sleep_idle_delay = { light_sleep_value: idle_timeout, deep_sleep_value: 3900 };
+      sleep_idle_delay = { light_sleep_value: idle_timeout, deep_sleep_value: opts._experimental_deep_sleep_value ?? 3900 };
     } else {
       sleep_idle_delay = { deep_sleep_value: idle_timeout };
     }

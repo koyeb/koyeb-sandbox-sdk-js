@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { koyeb, KoyebApi } from './api.js';
-import { DEFAULT_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT } from './constants.js';
+import { DEFAULT_CLAIM_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT } from './constants.js';
 import { MissingApiTokenError, PoolClaimError, ServiceTerminalStateError } from './errors.js';
 import { assert, getEnv, omitUndefined, waitFor } from './utils.js';
 
@@ -142,7 +142,7 @@ export async function list_claims(poolId: string, options: ListClaimsOptions = {
  * including unknown forward-compat values — is a terminal failure (fail
  * closed). Not cold-path-specific: this is general service health.
  */
-function classifyServiceStatus(status: koyeb.ServiceStatus): 'ready' | 'in_progress' | 'terminal_failure' {
+export function classifyServiceStatus(status: koyeb.ServiceStatus): 'ready' | 'in_progress' | 'terminal_failure' {
   if (status === 'HEALTHY' || status === 'DEGRADED') {
     return 'ready';
   }
@@ -202,7 +202,7 @@ export async function wait_claim_ready(
       return classification === 'ready';
     },
     options.timeout ?? DEFAULT_WAIT_TIMEOUT,
-    options.poll_interval ?? DEFAULT_POLL_INTERVAL,
+    options.poll_interval ?? DEFAULT_CLAIM_POLL_INTERVAL,
     options.signal,
   );
 }

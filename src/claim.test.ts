@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { claim, get_claim, wait_claim_ready, type ClaimResult } from './claim.js';
+import { DEFAULT_CLAIM_POLL_INTERVAL } from './constants.js';
 import { MissingApiTokenError, PoolClaimError, ServiceTerminalStateError } from './errors.js';
 
 // --- Fake fetch factory (system-boundary seam: the Koyeb public API) ---
@@ -224,6 +225,11 @@ describe('get_claim', () => {
 });
 
 describe('wait_claim_ready', () => {
+  it('uses the dedicated 2s claim poll interval, not the sandbox default', () => {
+    // Python keeps claim polling at 2.0s even though sandbox readiness polls at 0.5s.
+    expect(DEFAULT_CLAIM_POLL_INTERVAL).toBe(2);
+  });
+
   it('resolves true once the service is HEALTHY', async () => {
     const { fetch, calls } = fakeFetch([serviceReply('HEALTHY')]);
     vi.stubGlobal('fetch', fetch);

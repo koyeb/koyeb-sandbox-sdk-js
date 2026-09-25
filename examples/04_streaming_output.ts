@@ -14,7 +14,7 @@ for i in range(5):
   const code = await new Promise<number>((resolve) => {
     stream1.addEventListener('stdout', ({ data }) => process.stdout.write(`${data.data} `));
     stream1.addEventListener('stderr', ({ data }) => process.stdout.write(`ERR: ${data.data}`));
-    stream1.addEventListener('exit', ({ data }) => resolve(data.code));
+    stream1.addEventListener('exit', ({ data }) => resolve(data.code ?? 0));
   });
 
   console.log(`\nExit code: ${code}`);

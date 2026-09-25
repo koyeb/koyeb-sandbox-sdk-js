@@ -174,6 +174,9 @@ export class Sandbox {
   private readonly api: KoyebApi;
   private _conn_info?: ConnectionInfo;
   private _domain?: string;
+  // Pinned deployment (set on reconnection and network-policy updates) so
+  // readiness polls the replacement, not the still-active old deployment.
+  private _deployment_id?: string;
 
   constructor(
     public readonly app_id: string,
@@ -382,6 +385,33 @@ export class Sandbox {
     }
   }
 
+  /** The pinned deployment id, or the live service's active/latest when unset. */
+  private async resolveDeploymentId(): Promise<string | undefined> {
+    if (isDefined(this._deployment_id)) {
+      return this._deployment_id;
+    }
+
+    const service = await this.api.getService(this.service_id);
+    const deploymentId = service.active_deployment_id ?? service.latest_deployment_id;
+
+    if (deploymentId) {
+      this._deployment_id = deploymentId;
+    }
+
+    return deploymentId;
+  }
+
+  private pinDeployment(deploymentId: string): void {
+    this._deployment_id = deploymentId;
+  }
+
+  /** Drop cached connection state after a redeployment, pinning the new deployment. */
+  private resetConnectionState(deploymentId?: string): void {
+    this._deployment_id = deploymentId;
+    this._conn_info = undefined;
+    this._domain = undefined;
+  }
+
   static async get_from_id(serviceId: string, apiToken?: string, host?: string) {
     const token = apiToken ?? getEnv('KOYEB_API_TOKEN');
 
@@ -410,7 +440,12 @@ export class Sandbox {
 
     assert(secret?.value, noSecret());
 
-    return new Sandbox(service.app_id!, service.id!, service.name!, secret.value, token, host);
+    const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, secret.value, token, host);
+    // Reconnected handles poll the deployment they resolved, even if the
+    // service later rolls to another one.
+    sandbox.pinDeployment(deploymentId);
+
+    return sandbox;
   }
 
   async wait_ready(
@@ -476,8 +511,7 @@ export class Sandbox {
 
   private async deployment_healthy(): Promise<boolean> {
     try {
-      const service = await this.api.getService(this.service_id);
-      const deploymentId = service.active_deployment_id ?? service.latest_deployment_id;
+      const deploymentId = await this.resolveDeploymentId();
 
       if (!deploymentId) {
         return false;
@@ -565,8 +599,7 @@ export class Sandbox {
 
   private async get_metadata_connection_info(): Promise<{ public_url: string; routing_key: string } | undefined> {
     try {
-      const service = await this.api.getService(this.service_id);
-      const deploymentId = service.active_deployment_id || service.latest_deployment_id;
+      const deploymentId = await this.resolveDeploymentId();
       if (!deploymentId) return;
 
       const deployment = await this.api.getDeployment(deploymentId);
@@ -658,12 +691,33 @@ export class Sandbox {
       egress: { mode: 'EGRESS_POLICY_MODE_DEFAULT' },
     };
 
-    const service = await this.api.getService(this.service_id);
-    const deployment = await this.api.getDeployment(service.latest_deployment_id!);
+    try {
+      const service = await this.api.getService(this.service_id);
+      const deployment = await this.api.getDeployment(service.latest_deployment_id!);
 
-    await this.api.updateService(this.service_id, {
-      definition: { ...deployment.definition, network_policy },
-    });
+      const updated = await this.api.updateService(this.service_id, {
+        definition: { ...deployment.definition, network_policy },
+      });
+
+      // Pin the replacement so wait_ready() polls it, not the still-active old
+      // deployment. The policy is already applied, so a failed id lookup must
+      // not surface as an update failure.
+      let newDeploymentId: string | undefined;
+
+      try {
+        newDeploymentId =
+          updated?.latest_deployment_id ?? (await this.api.getService(this.service_id)).latest_deployment_id;
+      } catch {
+        // Readiness resolves the id fresh when no pin is set.
+      }
+
+      this.resetConnectionState(newDeploymentId);
+    } catch (error) {
+      if (error instanceof SandboxError) {
+        throw error;
+      }
+      throw new SandboxError(`Failed to update network policy: ${String(error)}`);
+    }
   }
 
   async delete(): Promise<void> {

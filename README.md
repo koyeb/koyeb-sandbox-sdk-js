@@ -324,10 +324,10 @@ const other = await Sandbox.create({ snapshot: 'my-snapshot', name: 'sbx' });
 Build a snapshot from a declarative recipe: the SDK runs your files and commands on a throwaway builder sandbox, snapshots the result, and tears the builder down.
 
 ```ts
-const snapshot = await Sandbox.template('python-ci', 'python:3.12', { workdir: '/workspace' })
-  .file('requirements.txt', 'pytest\nrequests')
+const snapshot = await Sandbox.template('node-ci', 'node:22-slim', { workdir: '/workspace' })
+  .file('package.json', '{"name":"ci","dependencies":{"axios":"^1.7.0"}}')
   .copy('./local-dir', '/workspace/dir')
-  .run('pip install -r requirements.txt')
+  .run('npm install', '/workspace')
   .build();
 
 const sandbox = await snapshot.spawn('runner');

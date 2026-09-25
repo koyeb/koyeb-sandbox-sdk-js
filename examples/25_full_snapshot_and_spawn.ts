@@ -20,7 +20,7 @@ async function main() {
   try {
     console.log('✓ Creating sandbox...');
     sbx = await Sandbox.create({
-      image: 'python:3.12',
+      image: 'node:22-slim',
       name: `full-snapshot-and-spawn-${suffix}`,
       wait_ready: true,
       api_token: apiToken,
@@ -29,16 +29,19 @@ async function main() {
 
     console.log('✓ Creating files...');
     await sbx.filesystem.mkdir('/workspace');
-    await sbx.filesystem.write_file('/workspace/requirements.txt', 'requests\n');
+    await sbx.filesystem.write_file('/workspace/package.json', '{"name":"demo","dependencies":{"axios":"^1.7.0"}}');
     console.log('  ✓ Files created');
 
     console.log('✓ Installing packages...');
-    await sbx.exec('pip3 install requests');
+    await sbx.exec('cd /workspace && npm install axios');
     console.log('  ✓ Packages installed');
 
     // Start an HTTP daemon in the background; the FULL snapshot captures it running.
     console.log('✓ Running HTTP daemon server on port 8000...');
-    await sbx.exec('python3 -m http.server', { timeout: 2 }).catch((error) => {
+    await sbx.exec(
+      'node -e \'require("http").createServer((_, res) => res.end("hello from the daemon")).listen(8000)\'',
+      { timeout: 2 },
+    ).catch((error) => {
       if (!(error instanceof SandboxTimeoutError)) {
         throw error;
       }
@@ -51,7 +54,7 @@ async function main() {
 
     console.log('✓ Spawning sandbox from full snapshot with different instance type...');
     sbx2 = await snapshot.spawn(`test-runner-full-${suffix}`, {
-      image: 'python:3.12',
+      image: 'node:22-slim',
       instance_type: 'nano',
       wait_ready: false,
       api_token: apiToken,
@@ -64,15 +67,15 @@ async function main() {
 
     console.log('✓ Verifying full snapshot...');
 
-    const imported = await sbx2.exec("python3 -c \"import requests; print('OK')\"");
+    const imported = await sbx2.exec("node -e \"require('axios'); console.log('OK')\"", { cwd: '/workspace' });
     if (imported.stdout.trim() !== 'OK') {
       throw new Error(`Package not found: ${imported.stdout}`);
     }
-    console.log('  ✓ Python package installed preserved');
+    console.log('  ✓ Node package installed preserved');
 
     // The process state is preserved: the daemon from the original sandbox is live.
     const served = await sbx2.exec('curl localhost:8000');
-    if (!served.stdout.includes('Directory listing for /')) {
+    if (!served.stdout.includes('hello from the daemon')) {
       throw new Error('HTTP server launched in original sandbox is not running anymore');
     }
     console.log('  ✓ Daemon HTTP server launched on initial sandbox is still running');
@@ -84,7 +87,7 @@ async function main() {
 }
 
 function takeSnapshot(sbx: Sandbox) {
-  return sbx.snapshot(`python-full-snapshot-${suffix}`, { snapshot_type: 'FULL' });
+  return sbx.snapshot(`node-full-snapshot-${suffix}`, { snapshot_type: 'FULL' });
 }
 
 main().catch((error) => {

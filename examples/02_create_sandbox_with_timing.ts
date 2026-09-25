@@ -45,7 +45,7 @@ const timer = new Timer();
 console.log('Starting sandbox operations...');
 
 const sandbox = await timer.time('Sandbox creation', 'Creating sandbox', () =>
-  Sandbox.create({ name: 'example-sandbox-timed', image: 'koyeb/sandbox:slim' }),
+  Sandbox.create({ name: 'example-sandbox-timed', image: 'koyeb/sandbox' }),
 );
 console.log(`Sandbox ID: ${sandbox.id}`);
 
@@ -58,11 +58,11 @@ async function main(args: { long?: boolean }) {
 
   if (args.long) {
     await timer.time('Package installation', '[LONG TEST] Installing a package', () =>
-      sandbox.exec('pip install requests'),
+      sandbox.exec('npm install axios'),
     );
 
     await timer.time('Heavy computation', '[LONG TEST] Running computation', () =>
-      sandbox.exec("python -c 'import time; sum(range(10000000)); time.sleep(2)'"),
+      sandbox.exec("node -e \"let s = 0; for (let i = 0; i < 1e7; i++) s += i; setTimeout(() => {}, 2000)\""),
     );
 
     await timer.time('Multiple health checks (5x)', '[LONG TEST] Multiple health checks...', async () => {

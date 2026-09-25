@@ -1,6 +1,6 @@
 import { Sandbox } from '@koyeb/sandbox-sdk';
 
-const sandbox = await Sandbox.create({ name: 'expose-port', image: 'koyeb/sandbox:slim' });
+const sandbox = await Sandbox.create({ name: 'expose-port', image: 'koyeb/sandbox' });
 console.log(`Sandbox ID: ${sandbox.id}`);
 
 async function retry(fn: () => Promise<Response>, retries = 5, delay = 1000): Promise<Response> {
@@ -27,7 +27,10 @@ async function main() {
   console.log('Test file created');
 
   console.log('\nStarting HTTP server on port 8080...');
-  const process_id = await sandbox.launch_process('python3 -m http.server 8080', { cwd: '/tmp' });
+  const process_id = await sandbox.launch_process(
+    'node -e \'require("http").createServer((_, res) => res.end(require("fs").readFileSync("/tmp/test.html"))).listen(8080)\'',
+    { cwd: '/tmp' },
+  );
   console.log(`Server started with process ID: ${process_id}`);
 
   console.log('Waiting for server to start...');
@@ -62,7 +65,10 @@ async function main() {
 
   console.log('\nSwitching to port 8081...');
   await sandbox.filesystem.write_file('/tmp/test2.html', '<h1>Hello from Sandbox!</h1><p>Port 8081</p>');
-  await sandbox.launch_process('python3 -m http.server 8081', { cwd: '/tmp' });
+  await sandbox.launch_process(
+    'node -e \'require("http").createServer((_, res) => res.end(require("fs").readFileSync("/tmp/test2.html"))).listen(8081)\'',
+    { cwd: '/tmp' },
+  );
 
   console.log('Waiting for server to start...');
   await new Promise((resolve) => setTimeout(resolve, 3000));

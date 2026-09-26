@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { KoyebApi } from './api.js';
+import { ServicePoolError } from './errors.js';
 import { ServicePool } from './service-pool.js';
 
 function fetchStub(capture: { url?: string } = {}) {
@@ -20,6 +21,16 @@ afterEach(() => {
 });
 
 describe('ServicePool.create', () => {
+  it('rejects DATABASE pools with a ServicePoolError before any API call', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(ServicePool.create('p', { type: 'DATABASE', api_token: 't' })).rejects.toBeInstanceOf(
+      ServicePoolError,
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('threads the host override to the pool endpoints', async () => {
     const capture = fetchStub();
 

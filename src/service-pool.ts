@@ -76,6 +76,14 @@ export class ServicePool {
   }
 
   static async create(name: string, options: CreatePoolOptions = {}): Promise<ServicePool> {
+    // Databases are out of scope for pools (product rule); every other
+    // service type is poolable. Fail before any API call.
+    if (options.type === 'DATABASE') {
+      throw new ServicePoolError(
+        'DATABASE pools are not supported: pools accept SANDBOX (default), WEB, and WORKER definitions',
+      );
+    }
+
     const { token, client: api } = resolveClient(options);
 
     // Options are a DefinitionOptions superset: thread them whole so no

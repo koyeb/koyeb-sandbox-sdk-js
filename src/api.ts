@@ -124,7 +124,17 @@ export class KoyebApi {
     await this.api(koyeb.deleteSecret({ ...this.params, path: { id } }));
   }
 
-  async claim(body: Body<'claim'>): Promise<koyeb.PoolClaimReply> {
+  /**
+   * Claim with the Python reference's retry policy: 429/5xx only, linear
+   * backoff (delay × attempt), the same body (request_id) on every attempt.
+   */
+  async claim(
+    body: Body<'claim'>,
+    policy: { maxAttempts?: number; retryDelaySeconds?: number } = {},
+  ): Promise<koyeb.PoolClaimReply> {
+    const maxAttempts = policy.maxAttempts ?? DEFAULT_CLAIM_ATTEMPTS;
+    const retryDelayMs =
+      policy.retryDelaySeconds !== undefined ? policy.retryDelaySeconds * 1_000 : DEFAULT_CLAIM_RETRY_DELAY_MS;
     let attempt = 1;
 
     for (; ;) {
@@ -133,11 +143,16 @@ export class KoyebApi {
       if (result.error !== undefined) {
         const status = result.response?.status;
 
-        if (attempt >= DEFAULT_CLAIM_ATTEMPTS || !isRetryableClaimStatus(status)) {
-          throw result.error;
+        if (attempt >= maxAttempts || !isRetryableClaimStatus(status)) {
+          // API failures join the SDK taxonomy like every other endpoint;
+          // transport failures (no response) propagate raw.
+          if (status === undefined) {
+            throw result.error;
+          }
+          throw new SandboxApiError(status, result.error);
         }
 
-        await wait(DEFAULT_CLAIM_RETRY_DELAY_MS * attempt);
+        await wait(retryDelayMs * attempt);
         attempt += 1;
         continue;
       }
@@ -223,7 +238,9 @@ export class KoyebApi {
   }
 }
 
-// Claiming is idempotent per (pool_id, request_id): only transient failures (no response, 429, 5xx) are retried.
+// Claiming is idempotent per (pool_id, request_id): only HTTP 429 and 5xx
+// responses are retried (Python parity); failures without a status — e.g.
+// network errors — surface immediately.
 function isRetryableClaimStatus(status: number | undefined) {
-  return status === undefined || status === 429 || status >= 500;
+  return status === 429 || (status !== undefined && status >= 500);
 }

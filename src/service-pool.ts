@@ -14,16 +14,19 @@ import { buildDefinition, type DefinitionOptions } from './definition.js';
 
 /**
  * Options for creating a service pool. Shares definition fields with
- * `Sandbox.create` via `DefinitionOptions`; adds pool-specific `size` and
- * `type`. Defaults to `type: SANDBOX` but other service types (WEB, WORKER,
- * DATABASE) are accepted.
+ * `Sandbox.create` via `DefinitionOptions`, minus the sandbox-only `enable_mesh`
+ * (mesh stays AUTO on pools) and `sandbox_secret` (the platform mints pool
+ * secrets). Defaults to `type: SANDBOX`; WEB and WORKER are accepted.
  */
-export type CreatePoolOptions = DefinitionOptions &
+/** No `enable_mesh` (mesh stays AUTO on pools) and no `sandbox_secret` (not exposed at the pool level). */
+export type CreatePoolOptions = Omit<DefinitionOptions, 'enable_mesh' | 'sandbox_secret'> &
   Partial<{
     /** Target number of pre-warmed members to maintain. Defaults to 1. */
     size: number;
     /** API token, overriding `process.env.KOYEB_API_TOKEN`. */
     api_token: string;
+    /** Target API host, overriding `KOYEB_API_HOST`. */
+    host: string;
   }>;
 
 /**
@@ -74,10 +77,36 @@ export class ServicePool {
   }
 
   static async create(name: string, options: CreatePoolOptions = {}): Promise<ServicePool> {
+    // Databases are out of scope for pools (product rule); every other
+    // service type is poolable. Fail before any API call.
+    if (options.type === 'DATABASE') {
+      throw new ServicePoolError(
+        'DATABASE pools are not supported: pools accept SANDBOX (default), WEB, and WORKER definitions',
+      );
+    }
+
+    // Fail-fast wiring validation (cross-client rule): sandbox pools own
+    // ports 3030/3031, and sandbox-only flags never apply to other types.
+    const type = options.type ?? 'SANDBOX';
+
+    if (type === 'SANDBOX' && (options.ports !== undefined || options.routes !== undefined)) {
+      throw new ServicePoolError(
+        'explicit ports/routes are not allowed on SANDBOX pools: the sandbox wiring owns ports 3030/3031',
+      );
+    }
+
+    if (
+      type !== 'SANDBOX' &&
+      (options.exposed_port_protocol !== undefined || options.enable_tcp_proxy !== undefined)
+    ) {
+      throw new ServicePoolError(
+        'exposed_port_protocol and enable_tcp_proxy are sandbox-only options and are not allowed on WEB/WORKER pools',
+      );
+    }
+
     const { token, client: api } = resolveClient(options);
 
-    // Options are a DefinitionOptions superset: thread them whole so no
-    // accepted field can be silently dropped by hand-maintaining this list.
+    // Thread options whole so no accepted field is silently dropped.
     const { definition } = buildDefinition({ ...options, name });
 
     const pool = await api.createServicePool(

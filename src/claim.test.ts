@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { claim, get_claim, wait_claim_ready, type ClaimResult } from './claim.js';
 import { DEFAULT_CLAIM_POLL_INTERVAL } from './constants.js';
-import { MissingApiTokenError, PoolClaimError, ServiceTerminalStateError } from './errors.js';
+import { MissingApiTokenError, PoolClaimError, SandboxApiError, ServiceTerminalStateError } from './errors.js';
 
 // --- Fake fetch factory (system-boundary seam: the Koyeb public API) ---
 
@@ -23,7 +23,8 @@ function serviceReply(status: string | undefined) {
 }
 
 function apiError(status: number, message = 'boom') {
-  return jsonResponse({ error: { message } }, status);
+  // The Koyeb API error envelope: a top-level message, like every endpoint.
+  return jsonResponse({ message }, status);
 }
 
 function fakeFetch(responses: (Response | Error)[], options: { repeatLast?: boolean } = {}) {
@@ -105,16 +106,33 @@ describe('claim', () => {
     expect(requestIds.size).toBe(1);
   });
 
+  it('retries a 429 → 429 → 200 sequence with three POSTs sharing one request_id', async () => {
+    const { fetch, calls } = fakeFetch([apiError(429), apiError(429), claimReply()]);
+    vi.stubGlobal('fetch', fetch);
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+
+    const pending = claim('pool-1', { api_token: 'token' });
+    await vi.advanceTimersByTimeAsync(3_000);
+    const result = await pending;
+
+    expect(result.service_id).toBe('svc-1');
+    expect(calls).toHaveLength(3);
+    const requestIds = new Set(calls.map((call) => (call.body as { request_id: string }).request_id));
+    expect(requestIds.size).toBe(1);
+  });
+
   it('gives up after 3 attempts, surfacing the last error', async () => {
     const { fetch, calls } = fakeFetch([apiError(500, 'first'), apiError(500, 'second'), apiError(500, 'third')]);
     vi.stubGlobal('fetch', fetch);
     vi.useFakeTimers({ toFake: ['setTimeout'] });
 
-    const pending = claim('pool-1', { api_token: 'token' });
-    const rejection = expect(pending).rejects.toMatchObject({ error: { message: 'third' } });
+    const pending = claim('pool-1', { api_token: 'token' }).catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(3_000);
-    await rejection;
+    const error = await pending;
 
+    // API failures are SDK errors carrying status and body, like every endpoint.
+    expect(error).toBeInstanceOf(SandboxApiError);
+    expect(error).toMatchObject({ status: 500, body: { message: 'third' } });
     expect(calls).toHaveLength(3);
   });
 
@@ -122,23 +140,58 @@ describe('claim', () => {
     const { fetch, calls } = fakeFetch([apiError(404, 'pool not found')]);
     vi.stubGlobal('fetch', fetch);
 
-    await expect(claim('pool-1', { api_token: 'token' })).rejects.toMatchObject({
-      error: { message: 'pool not found' },
-    });
+    const error = await claim('pool-1', { api_token: 'token' }).catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxApiError);
+    expect(error).toMatchObject({ status: 404, body: { message: 'pool not found' } });
     expect(calls).toHaveLength(1);
   });
 
-  it('retries when the request fails at the network level', async () => {
+  it('does not retry network-level failures, matching the Python reference', async () => {
     const { fetch, calls } = fakeFetch([new TypeError('fetch failed'), claimReply()]);
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(claim('pool-1', { api_token: 'token' })).rejects.toBeInstanceOf(TypeError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('honors max_attempts: a 429-storm stops at the configured budget', async () => {
+    const { fetch, calls } = fakeFetch([apiError(429), apiError(429), claimReply()]);
     vi.stubGlobal('fetch', fetch);
     vi.useFakeTimers({ toFake: ['setTimeout'] });
 
-    const pending = claim('pool-1', { api_token: 'token' });
-    await vi.advanceTimersByTimeAsync(1_000);
+    const pending = claim('pool-1', { api_token: 'token', max_attempts: 2 }).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const error = await pending;
+
+    expect(error).toBeInstanceOf(SandboxApiError);
+    expect(error).toMatchObject({ status: 429, body: { message: 'boom' } });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('honors retry_delay: the backoff is retry_delay × attempt in seconds', async () => {
+    const { fetch, calls } = fakeFetch([apiError(429), claimReply()]);
+    vi.stubGlobal('fetch', fetch);
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+
+    const pending = claim('pool-1', { api_token: 'token', retry_delay: 5 });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(calls).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1);
     const result = await pending;
 
     expect(result.service_id).toBe('svc-1');
     expect(calls).toHaveLength(2);
+  });
+
+  it('threads the host override to the claim endpoint', async () => {
+    const { fetch, calls } = fakeFetch([claimReply()]);
+    vi.stubGlobal('fetch', fetch);
+
+    await claim('pool-1', { api_token: 'token', host: 'https://koyeb.example.org' });
+
+    expect(calls[0].url.startsWith('https://koyeb.example.org/')).toBe(true);
   });
 
   it('retries on 429 rate limiting', async () => {

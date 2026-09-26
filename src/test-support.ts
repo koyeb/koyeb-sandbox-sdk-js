@@ -37,3 +37,28 @@ export function mockExec(sandbox: Sandbox, result: { stdout?: string; stderr?: s
     ]),
   );
 }
+
+export type PoolCall = { url: string; method: string; body?: any };
+
+/**
+ * Pool-flavored fake fetch at the Koyeb API boundary: records every request
+ * and answers create/get/update/delete with a minimal service pool reply.
+ */
+export function poolFetch() {
+  const calls: PoolCall[] = [];
+  const fetch = vi.fn(async (request: Request) => {
+    const text = await request.clone().text();
+    calls.push({
+      url: request.url,
+      method: request.method,
+      body: text ? JSON.parse(text) : undefined,
+    });
+
+    return new Response(JSON.stringify({ service_pool: { id: 'pool-1', name: 'my-pool' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  });
+
+  return { fetch, calls };
+}

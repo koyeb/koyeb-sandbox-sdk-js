@@ -108,6 +108,10 @@ export type DefinitionOptions = Partial<{
   enable_mesh: boolean;
   /** Use an explicit sandbox secret instead of generating one. */
   sandbox_secret: string;
+  /** Explicit member ports, sent verbatim (pool members of non-SANDBOX type). */
+  ports: Array<{ port: number; protocol: string }>;
+  /** Explicit member routes, sent verbatim (pool members of non-SANDBOX type). */
+  routes: Array<{ port: number; path: string }>;
 }>;
 
 /**
@@ -121,9 +125,28 @@ export function buildDefinition(opts: DefinitionOptions): {
 } {
   const network_policy = buildNetworkPolicy(opts.block_network, opts.outbound_allowlist);
 
+  const type = opts.type ?? 'SANDBOX';
+
+  const ports =
+    opts.ports ??
+    (type === 'SANDBOX'
+      ? [
+          { port: 3030, protocol: 'http' },
+          { port: 3031, protocol: opts.exposed_port_protocol ?? 'http' },
+        ]
+      : undefined);
+  const routes =
+    opts.routes ??
+    (type === 'SANDBOX'
+      ? [
+          { port: 3030, path: '/koyeb-sandbox/' },
+          { port: 3031, path: '/' },
+        ]
+      : undefined);
+
   const definition: koyeb.DeploymentDefinition = {
     name: opts.name,
-    type: opts.type ?? 'SANDBOX',
+    type,
     docker: {
       image: opts.image,
       privileged: opts.privileged,
@@ -134,14 +157,10 @@ export function buildDefinition(opts: DefinitionOptions): {
     },
     instance_types: [{ type: opts.instance_type }],
     regions: [opts.region ?? getEnv('KOYEB_REGION') ?? 'na'],
-    ports: [
-      { port: 3030, protocol: 'http' },
-      { port: 3031, protocol: opts.exposed_port_protocol ?? 'http' },
-    ],
-    routes: [
-      { port: 3030, path: '/koyeb-sandbox/' },
-      { port: 3031, path: '/' },
-    ],
+    // Only SANDBOX-typed definitions auto-wire the executor's ports and
+    // routes; every other type sends explicit wiring verbatim or none at all.
+    ...(ports && { ports }),
+    ...(routes && { routes }),
   };
 
   const sandbox_secret = opts.sandbox_secret ?? randomString(32);
@@ -158,7 +177,8 @@ export function buildDefinition(opts: DefinitionOptions): {
   }
 
   // Tri-state mesh mapping: the field is always sent, unset meaning AUTO
-  // (the Python SDK's explicit platform default).
+  // (the Python SDK's explicit platform default). Pools have no mesh option
+  // and always run AUTO.
   definition.mesh =
     opts.enable_mesh === undefined
       ? 'DEPLOYMENT_MESH_AUTO'

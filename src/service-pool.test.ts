@@ -51,8 +51,6 @@ describe('ServicePool.create', () => {
       entrypoint: ['/bin/sh', '-c'],
       command: 'sleep 1',
       args: ['--flag'],
-      enable_mesh: true,
-      sandbox_secret: 'explicit-secret',
       idle_timeout: 60,
       _experimental_enable_light_sleep: true,
       _experimental_deep_sleep_value: 600,
@@ -61,7 +59,6 @@ describe('ServicePool.create', () => {
     const body = create.mock.calls[0][0] as {
       definition: {
         docker: { entrypoint?: string[]; command?: string; args?: string[] };
-        mesh?: string;
         env: { key: string; value: string }[];
         scalings: { targets: { sleep_idle_delay: Record<string, number> }[] }[];
       };
@@ -72,11 +69,20 @@ describe('ServicePool.create', () => {
       command: 'sleep 1',
       args: ['--flag'],
     });
-    expect(body.definition.mesh).toBe('DEPLOYMENT_MESH_ENABLED');
-    expect(body.definition.env[0]).toEqual({ key: 'SANDBOX_SECRET', value: 'explicit-secret' });
     expect(body.definition.scalings[0].targets[0].sleep_idle_delay).toEqual({
       light_sleep_value: 60,
       deep_sleep_value: 600,
     });
+  });
+
+  it('exposes no pool-level mesh or secret options (compile-time)', () => {
+    // Type-level only: the calls never execute. Mesh stays AUTO on pools and
+    // secrets are platform-minted (KOYEB-6439); neither is a pool option.
+    if (false) {
+      // @ts-expect-error enable_mesh is not a pool option
+      void ServicePool.create('p', { enable_mesh: true });
+      // @ts-expect-error sandbox_secret is not a pool option
+      void ServicePool.create('p', { sandbox_secret: 'x' });
+    }
   });
 });

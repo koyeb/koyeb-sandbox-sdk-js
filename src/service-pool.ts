@@ -14,11 +14,11 @@ import { buildDefinition, type DefinitionOptions } from './definition.js';
 
 /**
  * Options for creating a service pool. Shares definition fields with
- * `Sandbox.create` via `DefinitionOptions`; adds pool-specific `size` and
- * `type`. Defaults to `type: SANDBOX` but other service types (WEB, WORKER,
- * DATABASE) are accepted.
+ * `Sandbox.create` via `DefinitionOptions`, minus the sandbox-only `enable_mesh`
+ * (mesh stays AUTO on pools) and `sandbox_secret` (the platform mints pool
+ * secrets). Defaults to `type: SANDBOX`; WEB and WORKER are accepted.
  */
-export type CreatePoolOptions = DefinitionOptions &
+export type CreatePoolOptions = Omit<DefinitionOptions, 'enable_mesh' | 'sandbox_secret'> &
   Partial<{
     /** Target number of pre-warmed members to maintain. Defaults to 1. */
     size: number;

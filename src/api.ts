@@ -133,7 +133,8 @@ export class KoyebApi {
     policy: { maxAttempts?: number; retryDelaySeconds?: number } = {},
   ): Promise<koyeb.PoolClaimReply> {
     const maxAttempts = policy.maxAttempts ?? DEFAULT_CLAIM_ATTEMPTS;
-    const retryDelayMs = (policy.retryDelaySeconds ?? DEFAULT_CLAIM_RETRY_DELAY_MS / 1_000) * 1_000;
+    const retryDelayMs =
+      policy.retryDelaySeconds !== undefined ? policy.retryDelaySeconds * 1_000 : DEFAULT_CLAIM_RETRY_DELAY_MS;
     let attempt = 1;
 
     for (; ;) {
@@ -143,7 +144,12 @@ export class KoyebApi {
         const status = result.response?.status;
 
         if (attempt >= maxAttempts || !isRetryableClaimStatus(status)) {
-          throw result.error;
+          // API failures join the SDK taxonomy like every other endpoint;
+          // transport failures (no response) propagate raw.
+          if (status === undefined) {
+            throw result.error;
+          }
+          throw new SandboxApiError(status, result.error);
         }
 
         await wait(retryDelayMs * attempt);

@@ -127,6 +127,23 @@ export function buildDefinition(opts: DefinitionOptions): {
 
   const type = opts.type ?? 'SANDBOX';
 
+  const ports =
+    opts.ports ??
+    (type === 'SANDBOX'
+      ? [
+          { port: 3030, protocol: 'http' },
+          { port: 3031, protocol: opts.exposed_port_protocol ?? 'http' },
+        ]
+      : undefined);
+  const routes =
+    opts.routes ??
+    (type === 'SANDBOX'
+      ? [
+          { port: 3030, path: '/koyeb-sandbox/' },
+          { port: 3031, path: '/' },
+        ]
+      : undefined);
+
   const definition: koyeb.DeploymentDefinition = {
     name: opts.name,
     type,
@@ -142,26 +159,8 @@ export function buildDefinition(opts: DefinitionOptions): {
     regions: [opts.region ?? getEnv('KOYEB_REGION') ?? 'na'],
     // Only SANDBOX-typed definitions auto-wire the executor's ports and
     // routes; every other type sends explicit wiring verbatim or none at all.
-    ...(opts.ports
-      ? { ports: opts.ports }
-      : type === 'SANDBOX'
-        ? {
-            ports: [
-              { port: 3030, protocol: 'http' },
-              { port: 3031, protocol: opts.exposed_port_protocol ?? 'http' },
-            ],
-          }
-        : {}),
-    ...(opts.routes
-      ? { routes: opts.routes }
-      : type === 'SANDBOX'
-        ? {
-            routes: [
-              { port: 3030, path: '/koyeb-sandbox/' },
-              { port: 3031, path: '/' },
-            ],
-          }
-        : {}),
+    ...(ports && { ports }),
+    ...(routes && { routes }),
   };
 
   const sandbox_secret = opts.sandbox_secret ?? randomString(32);
@@ -178,7 +177,8 @@ export function buildDefinition(opts: DefinitionOptions): {
   }
 
   // Tri-state mesh mapping: the field is always sent, unset meaning AUTO
-  // (the Python SDK's explicit platform default).
+  // (the Python SDK's explicit platform default). Pools have no mesh option
+  // and always run AUTO.
   definition.mesh =
     opts.enable_mesh === undefined
       ? 'DEPLOYMENT_MESH_AUTO'

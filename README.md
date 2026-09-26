@@ -98,12 +98,15 @@ Claims a sandbox from a pool and returns a `ClaimResult` with `claim_id`, `pool_
 - **Warm path** (`prewarmed: true`): the claimed sandbox is already running and ready to use.
 - **Cold path** (`prewarmed: false`): a new sandbox service is created on demand. `service_id` is returned immediately; wait for it with [`wait_claim_ready`](#wait_claim_readyclaimorserviceid-options).
 
-The SDK retries transient failures (network errors, `429`, `5xx`) automatically, reusing the same `request_id`, so retries never double-claim.
+The SDK retries HTTP `429` and `5xx` responses automatically, reusing the same `request_id`, so retries never double-claim. Failures without an HTTP status (e.g. network errors) are not retried.
 
-| Option       | Description                                                                                       |
-| ------------ | ------------------------------------------------------------------------------------------------- |
-| `request_id` | Idempotency key of the claim. Generated once (UUID v4) when omitted and preserved across retries. |
-| `api_token`  | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`.                           |
+| Option         | Description                                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------------- |
+| `request_id`   | Idempotency key of the claim. Generated once (UUID v4) when omitted and preserved across retries. |
+| `api_token`    | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`.                           |
+| `host`         | Target API host, overriding `KOYEB_API_HOST`.                                                     |
+| `max_attempts` | Max claim attempts on retryable failures (`429`/`5xx`). Defaults to 3.                            |
+| `retry_delay`  | Base delay in seconds between attempts; the wait is `retry_delay` × attempt. Defaults to 1.       |
 
 ### `get_claim(claimId, options?)`
 
@@ -150,29 +153,31 @@ await sandbox.delete();
 
 ## Managing Service Pools
 
-Service pools keep a set of pre-provisioned sandboxes warm so a claim is fulfilled immediately. The pool's `definition` is a SANDBOX-type `DeploymentDefinition` built from the same curated flags as `Sandbox.create`.
+Service pools keep a set of pre-provisioned sandboxes warm so a claim is fulfilled immediately. The pool's `definition` is a `DeploymentDefinition` built from the same curated flags as `Sandbox.create` — `type` defaults to `SANDBOX`; `WEB` and `WORKER` definitions are accepted (with their own `ports`/`routes`), and `DATABASE` is rejected. SANDBOX pools always carry the executor's auto wiring (ports 3030/3031) and keep mesh `AUTO`.
 
 ### `ServicePool.create(name, options?)`
 
 Creates a new service pool.
 
-| Option                             | Description                                                               |
-| ---------------------------------- | ------------------------------------------------------------------------- |
-| `size`                             | Target number of pre-warmed sandboxes. Defaults to 1.                     |
-| `image`                            | Docker image. Defaults to `koyeb/sandbox`.                                |
-| `instance_type`                    | Instance size. Defaults to `micro`.                                       |
-| `region`                           | Region slug. Defaults to `na`.                                            |
+| Option                             | Description                                                                             |
+| ---------------------------------- | --------------------------------------------------------------------------------------- |
+| `size`                             | Target number of pre-warmed sandboxes. Defaults to 1.                                   |
+| `type`                             | Definition type: `SANDBOX` (default), `WEB`, or `WORKER`. `DATABASE` is rejected.        |
+| `image`                            | Docker image. Defaults to `koyeb/sandbox`.                                              |
+| `instance_type`                    | Instance size. Defaults to `micro`.                                                     |
+| `region`                           | Region slug. Defaults to `na`.                                                          |
 | `env`                              | Environment variables.                                                    |
-| `config_files`                     | Config files with optional permissions.                                   |
-| `privileged`                       | Run in privileged mode.                                                   |
-| `registry_secret`                  | Registry secret name for private images.                                  |
-| `exposed_port_protocol`            | Protocol for the exposed port (`http` or `http2`).                        |
-| `enable_tcp_proxy`                 | Enable TCP proxying on port 3031.                                         |
-| `idle_timeout`                     | Seconds before members scale to zero. Set 0 to disable.                   |
-| `block_network`                    | Block all outbound network. Mutually exclusive with `outbound_allowlist`. |
-| `outbound_allowlist`               | IPs/CIDRs allowed as outbound; all other traffic blocked.                 |
-| `_experimental_enable_light_sleep` | Enable light sleep with `idle_timeout`.                                   |
-| `api_token`                        | API token, overriding `process.env.KOYEB_API_TOKEN`.                      |
+| `config_files`                     | Config files with optional permissions.                                                 |
+| `privileged`                       | Run in privileged mode.                                                                 |
+| `registry_secret`                  | Registry secret name for private images.                                                |
+| `ports` / `routes`                 | Explicit member wiring (non-SANDBOX types only; rejected on SANDBOX pools).              |
+| `exposed_port_protocol`            | Protocol for the exposed port (`http` or `http2`; SANDBOX only).                        |
+| `enable_tcp_proxy`                 | Enable TCP proxying on port 3031 (SANDBOX only).                                       |
+| `idle_timeout`                     | Seconds before members scale to zero. Set 0 to disable.                                 |
+| `block_network`                    | Block all outbound network. Mutually exclusive with `outbound_allowlist`.               |
+| `outbound_allowlist`               | IPs/CIDRs allowed as outbound; all other traffic blocked.                               |
+| `_experimental_enable_light_sleep` | Enable light sleep with `idle_timeout`.                                                 |
+| `api_token` / `host`               | API token and API host overrides.                                                       |
 
 ### `ServicePool.get(poolId, options?)`
 

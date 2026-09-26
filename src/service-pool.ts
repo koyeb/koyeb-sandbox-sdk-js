@@ -18,6 +18,7 @@ import { buildDefinition, type DefinitionOptions } from './definition.js';
  * (mesh stays AUTO on pools) and `sandbox_secret` (the platform mints pool
  * secrets). Defaults to `type: SANDBOX`; WEB and WORKER are accepted.
  */
+/** No `enable_mesh` (mesh stays AUTO on pools) and no `sandbox_secret` (not exposed at the pool level). */
 export type CreatePoolOptions = Omit<DefinitionOptions, 'enable_mesh' | 'sandbox_secret'> &
   Partial<{
     /** Target number of pre-warmed members to maintain. Defaults to 1. */
@@ -105,8 +106,7 @@ export class ServicePool {
 
     const { token, client: api } = resolveClient(options);
 
-    // Options are a DefinitionOptions superset: thread them whole so no
-    // accepted field can be silently dropped by hand-maintaining this list.
+    // Thread options whole so no accepted field is silently dropped.
     const { definition } = buildDefinition({ ...options, name });
 
     const pool = await api.createServicePool(

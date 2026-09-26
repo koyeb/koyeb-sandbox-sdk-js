@@ -24,6 +24,8 @@ export type CreatePoolOptions = DefinitionOptions &
     size: number;
     /** API token, overriding `process.env.KOYEB_API_TOKEN`. */
     api_token: string;
+    /** Target API host, overriding `KOYEB_API_HOST`. */
+    host: string;
   }>;
 
 /**

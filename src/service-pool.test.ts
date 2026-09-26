@@ -3,11 +3,31 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { KoyebApi } from './api.js';
 import { ServicePool } from './service-pool.js';
 
+function fetchStub(capture: { url?: string } = {}) {
+  const fetch = vi.fn(async (request: Request) => {
+    capture.url = request.url;
+    return new Response(JSON.stringify({ service_pool: { id: 'pool-1', name: 'my-pool' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  });
+  vi.stubGlobal('fetch', fetch);
+  return capture;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe('ServicePool.create', () => {
+  it('threads the host override to the pool endpoints', async () => {
+    const capture = fetchStub();
+
+    await ServicePool.create('my-pool', { api_token: 't', host: 'https://koyeb.example.org' });
+
+    expect(capture.url!.startsWith('https://koyeb.example.org/')).toBe(true);
+  });
+
   it('threads every definition option into the pool definition', async () => {
     const create = vi.spyOn(KoyebApi.prototype, 'createServicePool').mockResolvedValue({
       id: 'pool-1',

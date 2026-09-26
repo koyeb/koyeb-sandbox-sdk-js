@@ -128,17 +128,50 @@ describe('claim', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('retries when the request fails at the network level', async () => {
+  it('does not retry network-level failures, matching the Python reference', async () => {
     const { fetch, calls } = fakeFetch([new TypeError('fetch failed'), claimReply()]);
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(claim('pool-1', { api_token: 'token' })).rejects.toBeInstanceOf(TypeError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('honors max_attempts: a 429-storm stops at the configured budget', async () => {
+    const { fetch, calls } = fakeFetch([apiError(429), apiError(429), claimReply()]);
     vi.stubGlobal('fetch', fetch);
     vi.useFakeTimers({ toFake: ['setTimeout'] });
 
-    const pending = claim('pool-1', { api_token: 'token' });
-    await vi.advanceTimersByTimeAsync(1_000);
+    const pending = claim('pool-1', { api_token: 'token', max_attempts: 2 });
+    const rejection = expect(pending).rejects.toMatchObject({ error: { message: 'boom' } });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejection;
+
+    expect(calls).toHaveLength(2);
+  });
+
+  it('honors retry_delay: the backoff is retry_delay × attempt in seconds', async () => {
+    const { fetch, calls } = fakeFetch([apiError(429), claimReply()]);
+    vi.stubGlobal('fetch', fetch);
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+
+    const pending = claim('pool-1', { api_token: 'token', retry_delay: 5 });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(calls).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1);
     const result = await pending;
 
     expect(result.service_id).toBe('svc-1');
     expect(calls).toHaveLength(2);
+  });
+
+  it('threads the host override to the claim endpoint', async () => {
+    const { fetch, calls } = fakeFetch([claimReply()]);
+    vi.stubGlobal('fetch', fetch);
+
+    await claim('pool-1', { api_token: 'token', host: 'https://koyeb.example.org' });
+
+    expect(calls[0].url.startsWith('https://koyeb.example.org/')).toBe(true);
   });
 
   it('retries on 429 rate limiting', async () => {

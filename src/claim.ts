@@ -14,12 +14,20 @@ import { waitFor } from './time.js';
 export type ClaimOptions = Partial<{
   /**
    * Idempotency key of the claim. Generated once (UUID v4) when omitted and
-   * preserved across the SDK's internal retries: replaying a claim with the
-   * same `(pool_id, request_id)` pair always returns the same claim.
+   * preserved across the SDK's internal retries — 429/5xx only, up to
+   * `max_attempts`, with a `retry_delay` × attempt backoff: replaying a
+   * claim with the same `(pool_id, request_id)` pair always returns the
+   * same claim.
    */
   request_id: string;
   /** API token for authentication, overriding `process.env.KOYEB_API_TOKEN`. */
   api_token: string;
+  /** Target API host, overriding `KOYEB_API_HOST`. */
+  host: string;
+  /** Max claim attempts on retryable failures (429/5xx). Defaults to 3. */
+  max_attempts: number;
+  /** Base delay in seconds between retry attempts; the wait is retry_delay × attempt. Defaults to 1. */
+  retry_delay: number;
 }>;
 
 /**
@@ -85,7 +93,10 @@ export async function claim(poolId: string, options: ClaimOptions = {}): Promise
 
   const request_id = options.request_id ?? randomUUID();
 
-  const reply = await api.claim({ pool_id: poolId, request_id });
+  const reply = await api.claim(
+    { pool_id: poolId, request_id },
+    { maxAttempts: options.max_attempts, retryDelaySeconds: options.retry_delay },
+  );
 
   assert(reply.claim_id, new PoolClaimError('The pool claim reply did not include a claim_id'));
   assert(reply.service_id, new PoolClaimError('The pool claim reply did not include a service_id'));

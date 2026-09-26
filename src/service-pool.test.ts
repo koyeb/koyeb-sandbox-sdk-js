@@ -75,6 +75,52 @@ describe('ServicePool.create', () => {
     });
   });
 
+  it('sends a WEB pool member\'s ports and routes verbatim with no sandbox wiring', async () => {
+    const create = vi.spyOn(KoyebApi.prototype, 'createServicePool').mockResolvedValue({
+      id: 'pool-1',
+      name: 'my-pool',
+    } as never);
+
+    await ServicePool.create('my-pool', {
+      api_token: 't',
+      type: 'WEB',
+      ports: [{ port: 8080, protocol: 'http' }],
+      routes: [{ port: 8080, path: '/' }],
+    });
+
+    const definition = (create.mock.calls[0][0] as { definition: Record<string, unknown> }).definition;
+    expect(definition.ports).toEqual([{ port: 8080, protocol: 'http' }]);
+    expect(definition.routes).toEqual([{ port: 8080, path: '/' }]);
+    // No sandbox auto-wiring leaks into a WEB member.
+    expect(definition.proxy_ports).toBeUndefined();
+  });
+
+  it('rejects explicit ports or routes on SANDBOX pools before any API call', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(
+      ServicePool.create('p', { api_token: 't', ports: [{ port: 8080, protocol: 'http' }] }),
+    ).rejects.toBeInstanceOf(ServicePoolError);
+    await expect(
+      ServicePool.create('p', { api_token: 't', type: 'SANDBOX', routes: [{ port: 8080, path: '/' }] }),
+    ).rejects.toBeInstanceOf(ServicePoolError);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects sandbox-only wiring options on non-SANDBOX pools before any API call', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(
+      ServicePool.create('p', { api_token: 't', type: 'WEB', exposed_port_protocol: 'http' }),
+    ).rejects.toBeInstanceOf(ServicePoolError);
+    await expect(
+      ServicePool.create('p', { api_token: 't', type: 'WORKER', enable_tcp_proxy: true }),
+    ).rejects.toBeInstanceOf(ServicePoolError);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('exposes no pool-level mesh or secret options (compile-time)', () => {
     // Type-level only: the calls never execute. Mesh stays AUTO on pools and
     // secrets are platform-minted (KOYEB-6439); neither is a pool option.

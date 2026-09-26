@@ -84,6 +84,25 @@ export class ServicePool {
       );
     }
 
+    // Fail-fast wiring validation (cross-client rule): sandbox pools own
+    // ports 3030/3031, and sandbox-only flags never apply to other types.
+    const type = options.type ?? 'SANDBOX';
+
+    if (type === 'SANDBOX' && (options.ports !== undefined || options.routes !== undefined)) {
+      throw new ServicePoolError(
+        'explicit ports/routes are not allowed on SANDBOX pools: the sandbox wiring owns ports 3030/3031',
+      );
+    }
+
+    if (
+      type !== 'SANDBOX' &&
+      (options.exposed_port_protocol !== undefined || options.enable_tcp_proxy !== undefined)
+    ) {
+      throw new ServicePoolError(
+        'exposed_port_protocol and enable_tcp_proxy are sandbox-only options and are not allowed on WEB/WORKER pools',
+      );
+    }
+
     const { token, client: api } = resolveClient(options);
 
     // Options are a DefinitionOptions superset: thread them whole so no

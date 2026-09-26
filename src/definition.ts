@@ -108,6 +108,10 @@ export type DefinitionOptions = Partial<{
   enable_mesh: boolean;
   /** Use an explicit sandbox secret instead of generating one. */
   sandbox_secret: string;
+  /** Explicit member ports, sent verbatim (pool members of non-SANDBOX type). */
+  ports: Array<{ port: number; protocol: string }>;
+  /** Explicit member routes, sent verbatim (pool members of non-SANDBOX type). */
+  routes: Array<{ port: number; path: string }>;
 }>;
 
 /**
@@ -121,9 +125,11 @@ export function buildDefinition(opts: DefinitionOptions): {
 } {
   const network_policy = buildNetworkPolicy(opts.block_network, opts.outbound_allowlist);
 
+  const type = opts.type ?? 'SANDBOX';
+
   const definition: koyeb.DeploymentDefinition = {
     name: opts.name,
-    type: opts.type ?? 'SANDBOX',
+    type,
     docker: {
       image: opts.image,
       privileged: opts.privileged,
@@ -134,14 +140,28 @@ export function buildDefinition(opts: DefinitionOptions): {
     },
     instance_types: [{ type: opts.instance_type }],
     regions: [opts.region ?? getEnv('KOYEB_REGION') ?? 'na'],
-    ports: [
-      { port: 3030, protocol: 'http' },
-      { port: 3031, protocol: opts.exposed_port_protocol ?? 'http' },
-    ],
-    routes: [
-      { port: 3030, path: '/koyeb-sandbox/' },
-      { port: 3031, path: '/' },
-    ],
+    // Only SANDBOX-typed definitions auto-wire the executor's ports and
+    // routes; every other type sends explicit wiring verbatim or none at all.
+    ...(opts.ports
+      ? { ports: opts.ports }
+      : type === 'SANDBOX'
+        ? {
+            ports: [
+              { port: 3030, protocol: 'http' },
+              { port: 3031, protocol: opts.exposed_port_protocol ?? 'http' },
+            ],
+          }
+        : {}),
+    ...(opts.routes
+      ? { routes: opts.routes }
+      : type === 'SANDBOX'
+        ? {
+            routes: [
+              { port: 3030, path: '/koyeb-sandbox/' },
+              { port: 3031, path: '/' },
+            ],
+          }
+        : {}),
   };
 
   const sandbox_secret = opts.sandbox_secret ?? randomString(32);

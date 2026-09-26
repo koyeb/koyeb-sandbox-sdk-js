@@ -117,11 +117,16 @@ export type DefinitionOptions = Partial<{
 /**
  * Build a DeploymentDefinition from curated flags. The `type` defaults to
  * SANDBOX but pools may pass other types (WEB, WORKER, DATABASE).
- * Shared by `Sandbox.create` and `ServicePool.create`.
+ * Shared by `Sandbox.create` and `ServicePool.create`: in pool mode the
+ * definition carries no SDK-generated SANDBOX_SECRET (the platform mints
+ * pool secrets) and mesh stays AUTO.
  */
-export function buildDefinition(opts: DefinitionOptions): {
+export function buildDefinition(
+  opts: DefinitionOptions,
+  { pool = false }: { pool?: boolean } = {},
+): {
   definition: koyeb.DeploymentDefinition;
-  sandbox_secret: string;
+  sandbox_secret?: string;
 } {
   const network_policy = buildNetworkPolicy(opts.block_network, opts.outbound_allowlist);
 
@@ -163,9 +168,14 @@ export function buildDefinition(opts: DefinitionOptions): {
     ...(routes && { routes }),
   };
 
-  const sandbox_secret = opts.sandbox_secret ?? randomString(32);
+  const sandbox_secret = pool ? undefined : opts.sandbox_secret ?? randomString(32);
 
-  definition.env = [{ key: 'SANDBOX_SECRET', value: sandbox_secret }, ...buildEnvVars(opts.env)];
+  // Pools never inject an SDK-generated secret: user env passes through
+  // verbatim and the platform mints one server-side when the definition has none.
+  definition.env = [
+    ...(sandbox_secret !== undefined ? [{ key: 'SANDBOX_SECRET', value: sandbox_secret }] : []),
+    ...buildEnvVars(opts.env),
+  ];
 
   const config_files = buildConfigFiles(opts.config_files);
   if (config_files.length > 0) {
@@ -179,8 +189,9 @@ export function buildDefinition(opts: DefinitionOptions): {
   // Tri-state mesh mapping: the field is always sent, unset meaning AUTO
   // (the Python SDK's explicit platform default). Pools have no mesh option
   // and always run AUTO.
-  definition.mesh =
-    opts.enable_mesh === undefined
+  definition.mesh = pool
+    ? 'DEPLOYMENT_MESH_AUTO'
+    : opts.enable_mesh === undefined
       ? 'DEPLOYMENT_MESH_AUTO'
       : opts.enable_mesh
         ? 'DEPLOYMENT_MESH_ENABLED'

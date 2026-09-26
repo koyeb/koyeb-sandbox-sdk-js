@@ -119,6 +119,30 @@ describe('ServicePool.create', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('sends no SANDBOX_SECRET env on pool create: the platform mints it', async () => {
+    const { fetch, calls } = poolFetch();
+    vi.stubGlobal('fetch', fetch);
+
+    await ServicePool.create('my-pool', { api_token: 't' });
+
+    const definition = calls[0].body.definition;
+    expect(definition.env?.some(({ key }: { key: string }) => key === 'SANDBOX_SECRET')).toBe(false);
+  });
+
+  it('passes an explicit caller-provided SANDBOX_SECRET through verbatim', async () => {
+    const { fetch, calls } = poolFetch();
+    vi.stubGlobal('fetch', fetch);
+
+    await ServicePool.create('my-pool', {
+      api_token: 't',
+      env: { SANDBOX_SECRET: 'explicit-secret', OTHER: 'x' },
+    });
+
+    const definition = calls[0].body.definition;
+    const secrets = definition.env.filter(({ key }: { key: string }) => key === 'SANDBOX_SECRET');
+    expect(secrets).toEqual([{ key: 'SANDBOX_SECRET', value: 'explicit-secret' }]);
+  });
+
   it('keeps the SANDBOX auto ports, routes, and AUTO mesh on SANDBOX pools', async () => {
     const { fetch, calls } = poolFetch();
     vi.stubGlobal('fetch', fetch);
@@ -133,7 +157,7 @@ describe('ServicePool.create', () => {
 
   it('exposes no pool-level mesh or secret options (compile-time)', () => {
     // Type-level only: the calls never execute. Mesh stays AUTO on pools and
-    // the pool-level secret option is not exposed.
+    // secrets are platform-minted; neither is a pool option.
     if (false) {
       // @ts-expect-error enable_mesh is not a pool option
       void ServicePool.create('p', { enable_mesh: true });

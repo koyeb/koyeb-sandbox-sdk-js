@@ -153,7 +153,7 @@ await sandbox.delete();
 
 ## Managing Service Pools
 
-Service pools keep a set of pre-provisioned sandboxes warm so a claim is fulfilled immediately. The pool's `definition` is a `DeploymentDefinition` built from the same curated flags as `Sandbox.create` — `type` defaults to `SANDBOX`; `WEB` and `WORKER` definitions are accepted (with their own `ports`/`routes`), and `DATABASE` is rejected. SANDBOX pools always carry the executor's auto wiring (ports 3030/3031) and keep mesh `AUTO`.
+Service pools keep a set of pre-provisioned sandboxes warm so a claim is fulfilled immediately. The pool's `definition` is a `DeploymentDefinition` built from the same curated flags as `Sandbox.create` — `type` defaults to `SANDBOX`; `WEB` and `WORKER` definitions are accepted (with their own `ports`/`routes`), and `DATABASE` is rejected. SANDBOX pools always carry the executor's auto wiring (ports 3030/3031), keep mesh `AUTO`, and never inject a `SANDBOX_SECRET` — the platform mints one server-side; an explicit `SANDBOX_SECRET` in `env` passes through verbatim.
 
 ### `ServicePool.create(name, options?)`
 
@@ -166,7 +166,7 @@ Creates a new service pool.
 | `image`                            | Docker image. Defaults to `koyeb/sandbox`.                                              |
 | `instance_type`                    | Instance size. Defaults to `micro`.                                                     |
 | `region`                           | Region slug. Defaults to `na`.                                                          |
-| `env`                              | Environment variables.                                                    |
+| `env`                              | Environment variables. An explicit `SANDBOX_SECRET` passes through verbatim.            |
 | `config_files`                     | Config files with optional permissions.                                                 |
 | `privileged`                       | Run in privileged mode.                                                                 |
 | `registry_secret`                  | Registry secret name for private images.                                                |

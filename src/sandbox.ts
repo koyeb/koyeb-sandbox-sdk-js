@@ -14,6 +14,8 @@ import {
   InvalidPortError,
   MissingApiTokenError,
   NoSandboxSecretError,
+  SandboxCommandError,
+  type SandboxCommandResult,
   SandboxConnectionError,
   SandboxDeploymentError,
   SandboxError,
@@ -94,6 +96,13 @@ export type CreateSandboxOptions = Partial<{
   outbound_allowlist: string[];
 }>;
 
+export type ListSandboxesOptions = Partial<{
+  app_id: string;
+  name: string;
+  api_token: string;
+  project_id: string;
+}>;
+
 export type SandboxExec = TypedEventTarget<{
   stdout: MessageEvent<{ stream: 'stdout'; data: string }>;
   stderr: MessageEvent<{ stream: 'stderr'; data: string }>;
@@ -158,7 +167,7 @@ export class Sandbox {
     public readonly app_id: string,
     public readonly service_id: string,
     public readonly name: string,
-    private readonly sandbox_secret: string,
+    private readonly sandbox_secret: string | undefined,
     private readonly api_token?: string,
     private readonly owns_app = true,
   ) {
@@ -277,16 +286,20 @@ export class Sandbox {
         );
 
     try {
-      const service = await api.createService({
-        app_id: app.id,
-        definition,
-        instance_snapshot_id: snapshotId,
-        name: opts.name,
-        life_cycle: {
-          delete_after_create: parseDuration(opts.delete_after_delay),
-          delete_after_sleep: parseDuration(opts.delete_after_inactivity_delay),
+      const service = await api.createService(
+        {
+          app_id: app.id,
+          definition,
+          instance_snapshot_id: snapshotId,
+          name: opts.name,
+          life_cycle: {
+            delete_after_create: parseDuration(opts.delete_after_delay),
+            delete_after_sleep: parseDuration(opts.delete_after_inactivity_delay),
+          },
         },
-      }, undefined, projectId);
+        undefined,
+        projectId,
+      );
       return { service, ownsApp };
     } catch (error) {
       if (ownsApp) {
@@ -328,6 +341,52 @@ export class Sandbox {
     }
 
     return sandbox;
+  }
+
+  static async list(options: ListSandboxesOptions = {}): Promise<Sandbox[]> {
+    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
+    if (!token) {
+      throw new MissingApiTokenError();
+    }
+
+    const projectId = options.project_id ?? getEnv('KOYEB_PROJECT_ID') ?? undefined;
+    const api = new KoyebApi(token);
+    const sandboxes: Sandbox[] = [];
+    const limit = 100;
+    let offset = 0;
+
+    while (true) {
+      const page = await api.listServicesPage(
+        {
+          app_id: options.app_id,
+          name: options.name,
+          types: ['SANDBOX'],
+          limit: String(limit),
+          offset: String(offset),
+        },
+        projectId,
+      );
+      assert(page, new SandboxError('The sandbox service list response is empty'));
+      const services = page.services ?? [];
+
+      for (const service of services) {
+        assert(
+          service.id && service.app_id && service.name,
+          new SandboxError('A sandbox service list item is missing its id, app id, or name'),
+        );
+        sandboxes.push(new Sandbox(service.app_id, service.id, service.name, undefined, token, false));
+      }
+
+      offset += services.length;
+      if (services.length === 0 || page.has_next === false || (page.count !== undefined && offset >= page.count)) {
+        break;
+      }
+      if (page.has_next !== true && page.count === undefined && services.length < limit) {
+        break;
+      }
+    }
+
+    return sandboxes;
   }
 
   static create_from_snapshot(snapshot: Snapshot | string, options: CreateSandboxOptions = {}): Promise<Sandbox> {
@@ -400,7 +459,7 @@ export class Sandbox {
       }
 
       const metadata = deployment.metadata?.sandbox;
-      if (!this._conn_info && metadata?.public_url && metadata.routing_key) {
+      if (!this._conn_info && metadata?.public_url && metadata.routing_key && this.sandbox_secret) {
         this._conn_info = {
           public_url: `${metadata.public_url}/koyeb-sandbox`,
           routing_key: metadata.routing_key,
@@ -517,13 +576,16 @@ export class Sandbox {
       return this._conn_info;
     }
 
+    const sandboxSecret = this.sandbox_secret;
+    assert(sandboxSecret, new NoSandboxSecretError());
+
     const metadata = await this.get_metadata_connection_info();
 
     if (metadata) {
       this._conn_info = {
         public_url: `${metadata.public_url}/koyeb-sandbox`,
         routing_key: metadata.routing_key,
-        secret: this.sandbox_secret,
+        secret: sandboxSecret,
       };
       return this._conn_info;
     }
@@ -531,7 +593,7 @@ export class Sandbox {
     const domain = await this.get_domain_from_app();
     this._conn_info = {
       public_url: `https://${domain}/koyeb-sandbox`,
-      secret: this.sandbox_secret,
+      secret: sandboxSecret,
     };
     return this._conn_info;
   }
@@ -794,9 +856,25 @@ export class Sandbox {
       env,
       signal,
       timeout = DEFAULT_HTTP_TIMEOUT,
-    }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal; timeout?: number } = {},
-  ): Promise<{ stdout: string; stderr: string; code: number }> {
-    return this.request('/run', { method: 'POST', signal }, { cmd, cwd, env }, { timeout });
+      raise_on_error = false,
+    }: {
+      cwd?: string;
+      env?: Record<string, string>;
+      signal?: AbortSignal;
+      timeout?: number;
+      raise_on_error?: boolean;
+    } = {},
+  ): Promise<SandboxCommandResult> {
+    const result: SandboxCommandResult = await this.request(
+      '/run',
+      { method: 'POST', signal },
+      { cmd, cwd, env },
+      { timeout },
+    );
+    if (raise_on_error && result.code !== 0) {
+      throw new SandboxCommandError(cmd, result);
+    }
+    return result;
   }
 
   exec_stream(

@@ -27,6 +27,12 @@ jobs:
             flows: 16_,17_,18_,19_,20_,21_,22_
           - name: snapshots
             flows: 23_,24_,25_,26_
+          - name: docker-in-docker
+            flows: 27_
+          - name: service-pools
+            flows: 28_,29_
+          - name: discovery-and-errors
+            flows: 30_,31_
     name: ${{ matrix.name }}
     env:
       KOYEB_API_TOKEN: ${{ secrets.KOYEB_API_TOKEN }}

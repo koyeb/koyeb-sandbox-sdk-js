@@ -71,9 +71,7 @@ export class KoyebApi {
   }
 
   async createApp(body: Body<'createApp'>, projectId?: string) {
-    const response = await this.api(
-      koyeb.createApp({ ...this.params, headers: this.projectHeaders(projectId), body }),
-    );
+    const response = await this.api(koyeb.createApp({ ...this.params, headers: this.projectHeaders(projectId), body }));
     return response!.app!;
   }
 
@@ -82,9 +80,13 @@ export class KoyebApi {
     return response!.app!;
   }
 
-  async listServices(query: Query<'listServices'>) {
-    const response = await this.api(koyeb.listServices({ ...this.params, query }));
-    return response!.services!;
+  async listServicesPage(query: Query<'listServices'>, projectId?: string) {
+    return this.api(koyeb.listServices({ ...this.params, headers: this.projectHeaders(projectId), query }));
+  }
+
+  async listServices(query: Query<'listServices'>, projectId?: string) {
+    const response = await this.listServicesPage(query, projectId);
+    return response!.services ?? [];
   }
 
   async getService(id: string) {
@@ -153,7 +155,7 @@ export class KoyebApi {
   async claim(body: Body<'claim'>): Promise<koyeb.PoolClaimReply> {
     let attempt = 1;
 
-    for (; ;) {
+    for (;;) {
       const result = await koyeb.claim({ ...this.params, body });
 
       if (result.error !== undefined) {

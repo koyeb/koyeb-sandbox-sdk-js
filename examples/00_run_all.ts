@@ -43,8 +43,18 @@ const options = parseOptions();
 const allFiles = (await fs.readdir(import.meta.dirname)).filter(
   (file) => /^\d{2}_.+\.js$/.test(file) && !file.startsWith('00_'),
 );
-const expectedNumbers = Array.from({ length: 26 }, (_, index) => String(index + 1).padStart(2, '0'));
-const presentNumbers = new Set(allFiles.map((file) => file.slice(0, 2)));
+const expectedNumbers = Array.from({ length: 31 }, (_, index) => String(index + 1).padStart(2, '0'));
+const filesByNumber = new Map<string, string[]>();
+for (const file of allFiles) {
+  const number = file.slice(0, 2);
+  filesByNumber.set(number, [...(filesByNumber.get(number) ?? []), file]);
+}
+const duplicateNumbers = [...filesByNumber]
+  .filter(([, files]) => files.length > 1)
+  .map(([number, files]) => `${number} (${files.join(', ')})`);
+if (duplicateNumbers.length > 0) throw new Error(`Duplicate example scenarios: ${duplicateNumbers.join('; ')}`);
+
+const presentNumbers = new Set(filesByNumber.keys());
 const missingNumbers = expectedNumbers.filter((number) => !presentNumbers.has(number));
 if (missingNumbers.length > 0) throw new Error(`Missing example scenarios: ${missingNumbers.join(', ')}`);
 

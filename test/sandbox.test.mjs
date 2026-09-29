@@ -3,7 +3,9 @@ import test from 'node:test';
 
 import {
   KoyebApi,
+  NoSandboxSecretError,
   Sandbox,
+  SandboxCommandError,
   SandboxDeploymentError,
   SandboxServiceError,
   SandboxTimeoutError,
@@ -61,6 +63,69 @@ test('maps executor timeouts and server errors', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => jsonResponse({ error: 'broken' }, 500));
 
   await assert.rejects(sandbox.request('/test', { method: 'GET' }, undefined, { maxRetries: 0 }), SandboxServiceError);
+});
+
+test('exec returns a failed command result by default', async () => {
+  const sandbox = createSandbox();
+  const failed = { stdout: '', stderr: 'boom', code: 2 };
+  sandbox.request = async () => failed;
+
+  assert.equal(await sandbox.exec('false'), failed);
+});
+
+test('exec can raise SandboxCommandError with the failed result', async () => {
+  const sandbox = createSandbox();
+  const failed = { stdout: '', stderr: 'boom', code: 2 };
+  sandbox.request = async () => failed;
+
+  await assert.rejects(
+    sandbox.exec('false', { raise_on_error: true }),
+    (error) =>
+      error instanceof SandboxCommandError &&
+      error.command === 'false' &&
+      error.result === failed &&
+      error.message.includes('exit code 2'),
+  );
+});
+
+test('list paginates sandbox services and returns lazy handles', async (t) => {
+  const calls = [];
+  t.mock.method(KoyebApi.prototype, 'listServicesPage', async (query, projectId) => {
+    calls.push({ query, projectId });
+    const offset = Number(query.offset);
+    const count = 150;
+    const limit = Number(query.limit);
+    return {
+      services: Array.from({ length: Math.min(limit, count - offset) }, (_, index) => {
+        const number = offset + index;
+        return { id: `service-${number}`, app_id: `app-${number}`, name: `sandbox-${number}` };
+      }),
+      count,
+      has_next: offset + limit < count,
+    };
+  });
+
+  const sandboxes = await Sandbox.list({
+    api_token: 'token',
+    project_id: 'project-id',
+    app_id: 'app-filter',
+    name: 'sandbox',
+  });
+
+  assert.equal(sandboxes.length, 150);
+  assert.equal(sandboxes[0].id, 'service-0');
+  assert.equal(sandboxes[149].id, 'service-149');
+  assert.deepEqual(calls, [
+    {
+      query: { app_id: 'app-filter', name: 'sandbox', types: ['SANDBOX'], limit: '100', offset: '0' },
+      projectId: 'project-id',
+    },
+    {
+      query: { app_id: 'app-filter', name: 'sandbox', types: ['SANDBOX'], limit: '100', offset: '100' },
+      projectId: 'project-id',
+    },
+  ]);
+  await assert.rejects(sandboxes[0].exec('echo hi'), NoSandboxSecretError);
 });
 
 test('wait_ready checks deployment state before executor health', async (t) => {

@@ -1,6 +1,8 @@
 # Koyeb Sandbox examples
 
 Each numbered example checks the result that it shows.
+The runner requires one scenario for every number from 01 through 31.
+It rejects missing or duplicate scenario numbers.
 
 Build and check all examples:
 

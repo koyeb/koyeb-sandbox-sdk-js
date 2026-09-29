@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import net from 'node:net';
 import type { koyeb } from './api.js';
 import { DEFAULT_IDLE_TIMEOUT } from './constants.js';
@@ -236,43 +237,26 @@ export function omitUndefined<T extends object>(object: T): T {
   return Object.fromEntries(Object.entries(object).filter(([_, value]) => value !== undefined)) as T;
 }
 
-export function createArray<T>(length: number, init: (index: number) => T) {
-  return Array(length)
-    .fill(null)
-    .map((_, index) => init(index));
-}
-
-export function randomFloat(max: number) {
-  return Math.random() * max;
-}
-
-export function randomInteger(max: number) {
-  return Math.floor(randomFloat(max));
-}
-
-export function randomItem<T>(items: T[]) {
-  return items[randomInteger(items.length - 1)];
-}
-
 export function wait(ms: number, signal?: AbortSignal) {
   return new Promise<boolean>((resolve) => {
-    // An already-aborted signal never fires the listener: resolve up front.
     if (signal?.aborted) {
       resolve(false);
       return;
     }
 
-    const onAbort = () => {
-      clearTimeout(timeout);
-      resolve(false);
+    const finish = (result: boolean) => {
+      signal?.removeEventListener('abort', abort);
+      resolve(result);
     };
+    const abort = () => {
+      clearTimeout(timeout);
+      finish(false);
+    };
+    const timeout = setTimeout(() => finish(true), ms);
 
-    const timeout = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve(true);
-    }, ms);
-
-    signal?.addEventListener('abort', onAbort);
+    if (signal) {
+      signal.addEventListener('abort', abort, { once: true });
+    }
   });
 }
 
@@ -283,9 +267,9 @@ export async function waitFor(
   signal?: AbortSignal,
 ) {
   const start = Date.now();
+  let currentInterval = Math.min(0.1, interval);
 
   do {
-    // An already-aborted signal never fires wait()'s listener: stop up front.
     if (signal?.aborted) {
       return false;
     }
@@ -294,7 +278,11 @@ export async function waitFor(
       return true;
     }
 
-    await wait(interval * 1_000, signal);
+    if (!(await wait(currentInterval * 1_000, signal))) {
+      return false;
+    }
+
+    currentInterval = Math.min(currentInterval * 2, interval);
   } while (Date.now() - start < timeout * 1_000);
 
   return false;
@@ -306,15 +294,13 @@ export function getEnv(name: string) {
   }
 }
 
-export function nanoId(alphabet: string) {
-  const letters = alphabet.split('');
-
-  return (length: number) => {
-    return createArray(length, () => randomItem(letters)).join('');
-  };
+export function randomString(byteLength: number): string {
+  return randomBytes(byteLength).toString('base64url');
 }
 
-export const randomString = nanoId('-_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz');
+export function escapeShellArg(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
 
 export type Duration = number | `${number}${'s' | 'm' | 'h' | 'd'}`;
 

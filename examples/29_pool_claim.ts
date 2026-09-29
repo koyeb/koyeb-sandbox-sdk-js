@@ -1,9 +1,35 @@
+/**
+ * Pool claims: spawn a pool, claim a member, run code in it, clean up both.
+ *
+ * A claim hands out a pre-warmed sandbox when one is ready (prewarmed) or
+ * cold-starts a service on demand. The claimed sandbox is detached from the
+ * pool and owned by the caller — delete it like any other sandbox.
+ */
+import { randomUUID } from 'node:crypto';
+
 import { Sandbox, ServicePool, claim, get_claim, wait_claim_ready } from '@koyeb/sandbox-sdk';
 
+const apiToken = process.env.KOYEB_API_TOKEN;
+if (!apiToken) {
+  console.error('KOYEB_API_TOKEN is not set');
+  process.exit(1);
+}
+
+function check(condition: boolean, message: string): asserts condition {
+  if (!condition) {
+    throw new Error(`Example failed: ${message}`);
+  }
+}
+
 async function main() {
+  // Use a unique name so concurrent or repeated runs don't collide on the
+  // server-side unique (name, workspace) index.
+  const poolName = `example-pool-${randomUUID().slice(0, 8)}`;
+
   // Spawn a pool, claim from it, run code, and clean up both.
-  const pool = await ServicePool.create('example-pool', { size: 1, image: 'koyeb/sandbox:slim' });
+  const pool = await ServicePool.create(poolName, { size: 1, image: 'koyeb/sandbox:slim' });
   console.log(`✓ Created pool ${pool.id} (size ${pool.size})`);
+  check(Boolean(pool.id), 'pool creation returned no id');
 
   try {
     const claimed = await claim(pool.id);
@@ -12,9 +38,12 @@ async function main() {
     console.log(`  Request ID: ${claimed.request_id}`);
     console.log(`  Service ID: ${claimed.service_id}`);
     console.log(`  Prewarmed: ${claimed.prewarmed}`);
+    check(Boolean(claimed.claim_id), 'claim returned no claim_id');
+    check(Boolean(claimed.service_id), 'claim returned no service_id');
 
     const info = await get_claim(claimed.claim_id);
     console.log(`  Claim status: ${info.status}`);
+    check(Boolean(info.status), 'claim get returned no status');
 
     // Resolve the claimed service to a Sandbox up front, so the finally
     // block can clean it up even if the cold-path wait fails.
@@ -32,6 +61,7 @@ async function main() {
 
       const result = await sandbox.exec("echo 'Hello from a pooled sandbox!'");
       console.log(`\n  Sandbox output: ${result.stdout.trim()}`);
+      check(result.stdout.trim() === 'Hello from a pooled sandbox!', 'unexpected exec output');
     } finally {
       // A claimed service is detached from the pool and owned by the caller:
       // delete it like any other sandbox once you are done with it.
@@ -44,4 +74,7 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

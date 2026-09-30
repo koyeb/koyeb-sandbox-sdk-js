@@ -31,7 +31,8 @@ The snapshot benchmark uses 10 MB and one boot by default.
 Set `KOYEB_SNAPSHOT_BENCHMARK_SIZE_MB` or `KOYEB_SNAPSHOT_BENCHMARK_BOOTS` to change these values.
 
 The GitHub Actions workflow needs the `KOYEB_API_TOKEN` repository secret.
-It also accepts `KOYEB_API_HOST`, `KOYEB_PROJECT_ID`, and `KOYEB_REGION` repository variables.
+It also accepts `KOYEB_API_HOST`, `KOYEB_PROJECT_ID`, `KOYEB_REGION`, and
+`KOYEB_NETWORK_POLICY_REGION` and `KOYEB_SERVICE_POOL_REGION` repository variables.
 GitHub Actions does not use the local `.env` file.
 The API token selects the Koyeb organization.
 `KOYEB_PROJECT_ID` selects the project inside that organization.

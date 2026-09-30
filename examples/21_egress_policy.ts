@@ -12,7 +12,12 @@ await runExample('egress policy', async () => {
     EgressPolicyError,
   );
 
-  const sandbox = await Sandbox.create(sandboxOptions('egress-policy', { block_network: true }));
+  const sandbox = await Sandbox.create(
+    sandboxOptions('egress-policy', {
+      block_network: true,
+      region: process.env.KOYEB_NETWORK_POLICY_REGION || 'nl-north-1',
+    }),
+  );
   try {
     assert.notEqual((await sandbox.exec(probe)).code, 0);
 

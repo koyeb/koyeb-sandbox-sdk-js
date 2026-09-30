@@ -9,6 +9,7 @@ await runExample('pool claim', async () => {
   const pool = await ServicePool.create(exampleName('claim-demo'), {
     size: 1,
     image: 'koyeb/sandbox:slim',
+    region: process.env.KOYEB_SERVICE_POOL_REGION || 'nl-north-1',
     api_token: apiToken,
   });
 

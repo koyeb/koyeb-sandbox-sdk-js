@@ -39,6 +39,8 @@ jobs:
       KOYEB_API_HOST: ${{ vars.KOYEB_API_HOST || 'https://app.koyeb.com' }}
       KOYEB_PROJECT_ID: ${{ vars.KOYEB_PROJECT_ID }}
       KOYEB_REGION: ${{ vars.KOYEB_REGION || 'na' }}
+      KOYEB_NETWORK_POLICY_REGION: ${{ vars.KOYEB_NETWORK_POLICY_REGION || 'nl-north-1' }}
+      KOYEB_SERVICE_POOL_REGION: ${{ vars.KOYEB_SERVICE_POOL_REGION || 'nl-north-1' }}
       KOYEB_AUTO_DELETE_DELAY: '60'
       KOYEB_SNAPSHOT_BENCHMARK_SIZE_MB: '1'
       KOYEB_SNAPSHOT_BENCHMARK_BOOTS: '1'

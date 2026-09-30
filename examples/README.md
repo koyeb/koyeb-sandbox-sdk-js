@@ -13,11 +13,13 @@ pnpm examples:check
 Run all examples against Koyeb:
 
 ```bash
-export KOYEB_API_TOKEN="your-token"
-export KOYEB_PROJECT_ID="your-project-id" # Optional
-export KOYEB_REGION="na"                  # Optional
+cp .env.example .env
+# Edit .env and set KOYEB_API_TOKEN.
 pnpm examples:e2e
 ```
+
+The examples load the repository `.env` file automatically.
+Existing shell variables take priority over values from `.env`.
 
 Run selected examples:
 
@@ -30,5 +32,6 @@ Set `KOYEB_SNAPSHOT_BENCHMARK_SIZE_MB` or `KOYEB_SNAPSHOT_BENCHMARK_BOOTS` to ch
 
 The GitHub Actions workflow needs the `KOYEB_API_TOKEN` repository secret.
 It also accepts `KOYEB_API_HOST`, `KOYEB_PROJECT_ID`, and `KOYEB_REGION` repository variables.
+GitHub Actions does not use the local `.env` file.
 The API token selects the Koyeb organization.
 `KOYEB_PROJECT_ID` selects the project inside that organization.

@@ -27,6 +27,9 @@ Set your [API access token](https://app.koyeb.com/settings/api) before using the
 export KOYEB_API_TOKEN="<your-api-token>"
 ```
 
+For repository examples, you can instead copy `.env.example` to `.env` and set the token there.
+The examples load `.env` automatically.
+
 ## Quick Start
 
 ```js

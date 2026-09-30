@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import path from 'node:path';
+import { loadEnvFile } from 'node:process';
 
 import { Sandbox, type CreateSandboxOptions } from '@koyeb/sandbox-sdk';
+
+try {
+  loadEnvFile(path.resolve(import.meta.dirname, '..', '.env'));
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+}
 
 export type CommandResult = { stdout: string; stderr: string; code: number };
 

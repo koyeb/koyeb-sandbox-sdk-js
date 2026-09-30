@@ -1,25 +1,17 @@
-import { Sandbox } from '@koyeb/sandbox-sdk';
+import assert from 'node:assert/strict';
 
-const sandbox = await Sandbox.create({ name: 'file-ops', image: 'koyeb/sandbox:slim' });
-console.log(`Sandbox ID: ${sandbox.id}`);
-const fs = sandbox.filesystem;
+import { assertCommand, runExample, withSandbox } from './_helpers.js';
 
-async function main() {
-  const content = 'Hello, Koyeb Sandbox!\nThis is a test file.';
-  await fs.write_file('/tmp/hello.txt', content);
+await runExample('file operations', async () => {
+  await withSandbox('file-operations', {}, async (sandbox) => {
+    const content = 'Hello, Koyeb Sandbox!\nThis is a test file.';
+    await sandbox.filesystem.write_file('/tmp/hello.txt', content);
+    assert.equal((await sandbox.filesystem.read_file('/tmp/hello.txt')).content, content);
 
-  const fileInfo = await fs.read_file('/tmp/hello.txt');
-  console.log(fileInfo.content);
-
-  const code = "#!/usr/bin/env python3\nprint('Hello from Python!')\n";
-  await fs.write_file('/tmp/script.py', code);
-  await sandbox.exec('chmod +x /tmp/script.py');
-  const result = await sandbox.exec('/tmp/script.py');
-  console.log(result.stdout);
-}
-
-async function cleanup() {
-  await sandbox.delete();
-}
-
-main().catch(console.error).finally(cleanup);
+    await sandbox.filesystem.write_file('/tmp/script.py', "#!/usr/bin/env python3\nprint('Hello from Python!')\n");
+    assertCommand(await sandbox.exec('chmod +x /tmp/script.py'));
+    const result = await sandbox.exec('/tmp/script.py');
+    assertCommand(result);
+    assert.equal(result.stdout.trim(), 'Hello from Python!');
+  });
+});

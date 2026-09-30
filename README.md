@@ -27,6 +27,9 @@ Set your [API access token](https://app.koyeb.com/settings/api) before using the
 export KOYEB_API_TOKEN="<your-api-token>"
 ```
 
+For repository examples, you can instead copy `.env.example` to `.env` and set the token there.
+The examples load `.env` automatically.
+
 ## Quick Start
 
 ```js
@@ -69,6 +72,13 @@ Creates a new sandbox.
 | `enable_tcp_proxy`                 | Enable TCP proxying on port 3031.                                                                                                   |
 | `privileged`                       | Run the sandbox in privileged mode.                                                                                                 |
 | `registry_secret`                  | Name of the Koyeb registry secret required to pull private images.                                                                  |
+| `app_id`                           | Existing app that receives the sandbox service.                                                                                     |
+| `project_id`                       | Project for a new app and service. Defaults to `KOYEB_PROJECT_ID`.                                                                  |
+| `enable_mesh`                      | Enable or disable the Koyeb service mesh.                                                                                           |
+| `entrypoint`                       | Docker entrypoint override.                                                                                                         |
+| `command`                          | Docker command override.                                                                                                            |
+| `args`                             | Docker command arguments.                                                                                                           |
+| `snapshot`                         | Snapshot object or filesystem snapshot ID used to create the sandbox.                                                               |
 | `delete_after_delay`               | Time to wait before automatically deleting the sandbox after creation.                                                              |
 | `delete_after_inactivity_delay`    | Time to wait before automatically deleting the sandbox after inactivity.                                                            |
 | `_experimental_enable_light_sleep` | When enabled, uses idle_timeout for light_sleep and sets deep_sleep=3900.                                                           |
@@ -220,13 +230,23 @@ await pool.delete();
 | `update_lifecycle()`                                     | Change the auto deletion properties.                                             |
 | `update_network_policy(values?)`                         | Update the egress policy (block, allowlist, or reset). Triggers a redeployment.  |
 | `delete()`                                               | Tears down the underlying service.                                               |
+| `snapshot(name, type?, wait?, timeout?)`                 | Creates a filesystem or full snapshot.                                           |
+
+## Snapshots
+
+Use `SnapshotType.FILESYSTEM` to preserve files.
+Use `SnapshotType.FULL` to preserve files and process state.
+
+`Snapshot.spawn()` creates a sandbox from a snapshot.
+`DeclarativeSnapshot` creates a reusable filesystem snapshot from files and commands.
+`Sandbox.template()` creates a declarative snapshot builder.
 
 ## Command Execution
 
-| Method                       | Description                                                                                            |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `exec(cmd, options?)`        | Runs a command. Supports `cwd`, `env`, `timeout`, and `AbortSignal`.                                    |
-| `exec_stream(cmd, options?)` | Streams command output. Emits `stdout`, `stderr`, `exit`, `end`, and `error`.                           |
+| Method                       | Description                                                                   |
+| ---------------------------- | ----------------------------------------------------------------------------- |
+| `exec(cmd, options?)`        | Runs a command. Supports `cwd`, `env`, `timeout`, and `AbortSignal`.          |
+| `exec_stream(cmd, options?)` | Streams command output. Emits `stdout`, `stderr`, `exit`, `end`, and `error`. |
 
 ### Streaming Example
 

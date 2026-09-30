@@ -1,24 +1,16 @@
-import { Sandbox } from '@koyeb/sandbox-sdk';
+import assert from 'node:assert/strict';
 
-const sandbox = await Sandbox.create({ name: 'working-dir', image: 'koyeb/sandbox:slim' });
-console.log(`Sandbox ID: ${sandbox.id}`);
+import { assertCommand, runExample, withSandbox } from './_helpers.js';
 
-async function main() {
-  await sandbox.exec('mkdir -p /tmp/my_project/src');
-  await sandbox.exec(`echo 'print("hello")' > /tmp/my_project/src/main.py`);
-
-  let result = await sandbox.exec('pwd', { cwd: '/tmp/my_project' });
-  console.log(result.stdout);
-
-  result = await sandbox.exec('ls -la', { cwd: '/tmp/my_project' });
-  console.log(result.stdout);
-
-  result = await sandbox.exec('cat src/main.py', { cwd: '/tmp/my_project' });
-  console.log(result.stdout);
-}
-
-async function cleanup() {
-  await sandbox.delete();
-}
-
-main().catch(console.error).finally(cleanup);
+await runExample('working directory', async () => {
+  await withSandbox('working-directory', {}, async (sandbox) => {
+    assertCommand(await sandbox.exec('mkdir -p /tmp/project/src'));
+    assertCommand(await sandbox.exec(`echo 'print("hello")' > /tmp/project/src/main.py`));
+    const pwd = await sandbox.exec('pwd', { cwd: '/tmp/project' });
+    assertCommand(pwd);
+    assert.equal(pwd.stdout.trim(), '/tmp/project');
+    const file = await sandbox.exec('cat src/main.py', { cwd: '/tmp/project' });
+    assertCommand(file);
+    assert.match(file.stdout, /hello/);
+  });
+});

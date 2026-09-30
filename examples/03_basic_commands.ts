@@ -1,27 +1,18 @@
-import { Sandbox } from '@koyeb/sandbox-sdk';
+import assert from 'node:assert/strict';
 
-const sandbox = await Sandbox.create({ name: 'basic-commands', image: 'koyeb/sandbox:slim' });
-console.log(`Sandbox ID: ${sandbox.id}`);
+import { assertCommand, runExample, withSandbox } from './_helpers.js';
 
-async function main() {
-  let result = await sandbox.exec("echo 'Sandbox is ready!'");
-  console.log(result.stdout);
+await runExample('basic commands', async () => {
+  await withSandbox('basic-commands', {}, async (sandbox) => {
+    let result = await sandbox.exec("echo 'Sandbox is ready!'");
+    assertCommand(result);
+    assert.equal(result.stdout.trim(), 'Sandbox is ready!');
 
-  result = await sandbox.exec("python3 -c 'print(2 + 2)'");
-  console.log(result.stdout);
+    result = await sandbox.exec("python3 -c 'print(2 + 2)'");
+    assertCommand(result);
+    assert.equal(result.stdout.trim(), '4');
 
-  result = await sandbox.exec(
-    `python3 -c "
-import sys
-print(f'Python version: {sys.version.split()[0]}')
-print(f'Platform: {sys.platform}')
-"`,
-  );
-  console.log(result.stdout);
-}
-
-async function cleanup() {
-  await sandbox.delete();
-}
-
-main().catch(console.error).finally(cleanup);
+    result = await sandbox.exec('false');
+    assert.notEqual(result.code, 0);
+  });
+});

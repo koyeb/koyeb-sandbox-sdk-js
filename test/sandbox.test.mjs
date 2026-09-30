@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { Sandbox, SandboxDeploymentError, SandboxServiceError, SandboxTimeoutError } from '../lib/index.js';
+import {
+  KoyebApi,
+  NoSandboxSecretError,
+  Sandbox,
+  SandboxCommandError,
+  SandboxDeploymentError,
+  SandboxServiceError,
+  SandboxTimeoutError,
+  Snapshot,
+  SnapshotStatus,
+  SnapshotType,
+} from '../lib/index.js';
 
 function createSandbox() {
   const sandbox = new Sandbox('app-id', 'service-id', 'sandbox', 'secret', 'token');
@@ -52,6 +63,69 @@ test('maps executor timeouts and server errors', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => jsonResponse({ error: 'broken' }, 500));
 
   await assert.rejects(sandbox.request('/test', { method: 'GET' }, undefined, { maxRetries: 0 }), SandboxServiceError);
+});
+
+test('exec returns a failed command result by default', async () => {
+  const sandbox = createSandbox();
+  const failed = { stdout: '', stderr: 'boom', code: 2 };
+  sandbox.request = async () => failed;
+
+  assert.equal(await sandbox.exec('false'), failed);
+});
+
+test('exec can raise SandboxCommandError with the failed result', async () => {
+  const sandbox = createSandbox();
+  const failed = { stdout: '', stderr: 'boom', code: 2 };
+  sandbox.request = async () => failed;
+
+  await assert.rejects(
+    sandbox.exec('false', { raise_on_error: true }),
+    (error) =>
+      error instanceof SandboxCommandError &&
+      error.command === 'false' &&
+      error.result === failed &&
+      error.message.includes('exit code 2'),
+  );
+});
+
+test('list paginates sandbox services and returns lazy handles', async (t) => {
+  const calls = [];
+  t.mock.method(KoyebApi.prototype, 'listServicesPage', async (query, projectId) => {
+    calls.push({ query, projectId });
+    const offset = Number(query.offset);
+    const count = 150;
+    const limit = Number(query.limit);
+    return {
+      services: Array.from({ length: Math.min(limit, count - offset) }, (_, index) => {
+        const number = offset + index;
+        return { id: `service-${number}`, app_id: `app-${number}`, name: `sandbox-${number}` };
+      }),
+      count,
+      has_next: offset + limit < count,
+    };
+  });
+
+  const sandboxes = await Sandbox.list({
+    api_token: 'token',
+    project_id: 'project-id',
+    app_id: 'app-filter',
+    name: 'sandbox',
+  });
+
+  assert.equal(sandboxes.length, 150);
+  assert.equal(sandboxes[0].id, 'service-0');
+  assert.equal(sandboxes[149].id, 'service-149');
+  assert.deepEqual(calls, [
+    {
+      query: { app_id: 'app-filter', name: 'sandbox', types: ['SANDBOX'], limit: '100', offset: '0' },
+      projectId: 'project-id',
+    },
+    {
+      query: { app_id: 'app-filter', name: 'sandbox', types: ['SANDBOX'], limit: '100', offset: '100' },
+      projectId: 'project-id',
+    },
+  ]);
+  await assert.rejects(sandboxes[0].exec('echo hi'), NoSandboxSecretError);
 });
 
 test('wait_ready checks deployment state before executor health', async (t) => {
@@ -198,4 +272,109 @@ test('process helpers reject executor error bodies', async () => {
   sandbox.request = async () => ({ success: false, error: 'cannot start process' });
 
   await assert.rejects(sandbox.launch_process('sleep 10'), /cannot start process/);
+});
+
+test('create supports an existing app and container overrides', async (t) => {
+  const createServiceCalls = [];
+  let deletedService;
+
+  t.mock.method(KoyebApi.prototype, 'createService', async (body, query, projectId) => {
+    createServiceCalls.push({ body, query, projectId });
+    return { app_id: body.app_id, id: 'service-id', name: body.name };
+  });
+  t.mock.method(KoyebApi.prototype, 'createApp', async () => {
+    throw new Error('createApp must not run');
+  });
+  t.mock.method(KoyebApi.prototype, 'deleteService', async (id) => {
+    deletedService = id;
+  });
+
+  const sandbox = await Sandbox.create({
+    api_token: 'token',
+    app_id: 'existing-app',
+    project_id: 'project-id',
+    name: 'custom-runtime',
+    wait_ready: false,
+    enable_mesh: true,
+    entrypoint: ['node'],
+    command: 'server.js',
+    args: ['--port', '3000'],
+  });
+
+  assert.equal(createServiceCalls.length, 2);
+  assert.deepEqual(createServiceCalls[0].query, { dry_run: true });
+  assert.deepEqual(createServiceCalls[1].body.definition.docker.entrypoint, ['node']);
+  assert.equal(createServiceCalls[1].body.definition.docker.command, 'server.js');
+  assert.deepEqual(createServiceCalls[1].body.definition.docker.args, ['--port', '3000']);
+  assert.equal(createServiceCalls[1].body.definition.mesh, 'DEPLOYMENT_MESH_ENABLED');
+  assert.equal(createServiceCalls[1].projectId, 'project-id');
+
+  await sandbox.delete();
+  assert.equal(deletedService, 'service-id');
+});
+
+test('create restores a full snapshot without a deployment definition', async (t) => {
+  let createServiceBody;
+  let createAppBody;
+  let createServiceProjectId;
+  let createAppProjectId;
+
+  t.mock.method(KoyebApi.prototype, 'createApp', async (body, projectId) => {
+    createAppBody = body;
+    createAppProjectId = projectId;
+    return { id: 'app-id' };
+  });
+  t.mock.method(KoyebApi.prototype, 'createService', async (body, _query, projectId) => {
+    createServiceBody = body;
+    createServiceProjectId = projectId;
+    return { app_id: body.app_id, id: 'service-id', name: body.name };
+  });
+
+  const snapshot = Snapshot.fromApi(
+    {
+      id: 'snapshot-id',
+      project_id: 'project-id',
+      type: 'INSTANCE_SNAPSHOT_TYPE_FULL',
+    },
+    'token',
+    'snapshot-secret',
+  );
+  await snapshot.spawn({
+    name: 'restored',
+    wait_ready: false,
+  });
+
+  assert.equal(createServiceBody.instance_snapshot_id, 'snapshot-id');
+  assert.equal(createServiceBody.definition, undefined);
+  assert.equal(createServiceProjectId, 'project-id');
+  assert.equal(createAppProjectId, 'project-id');
+});
+
+test('snapshot uses the running instance and maps API state', async () => {
+  const sandbox = createSandbox();
+  let createSnapshotBody;
+
+  sandbox.api = {
+    listInstances: async () => [{ id: 'instance-id' }],
+    createInstanceSnapshot: async (body) => {
+      createSnapshotBody = body;
+      return {
+        id: 'snapshot-id',
+        name: body.name,
+        service_id: 'service-id',
+        type: body.type,
+        status: 'INSTANCE_SNAPSHOT_STATUS_AVAILABLE',
+      };
+    },
+  };
+
+  const snapshot = await sandbox.snapshot('filesystem-snapshot', SnapshotType.FILESYSTEM, false);
+
+  assert.deepEqual(createSnapshotBody, {
+    instance_id: 'instance-id',
+    name: 'filesystem-snapshot',
+    type: 'INSTANCE_SNAPSHOT_TYPE_FILESYSTEM',
+  });
+  assert.equal(snapshot.id, 'snapshot-id');
+  assert.equal(snapshot.status, SnapshotStatus.AVAILABLE);
 });

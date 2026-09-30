@@ -1,96 +1,22 @@
-import { Sandbox } from '@koyeb/sandbox-sdk';
+import assert from 'node:assert/strict';
 
-const sandbox = await Sandbox.create({ name: 'expose-port', image: 'koyeb/sandbox:slim' });
-console.log(`Sandbox ID: ${sandbox.id}`);
+import { retry, runExample, sleep, withSandbox } from './_helpers.js';
 
-async function retry(fn: () => Promise<Response>, retries = 5, delay = 1000): Promise<Response> {
-  try {
-    let res = await fn();
-    if (!res.ok) {
-      throw new Error(`Status: ${res.status}`);
-    }
-    return res;
-  } catch (error) {
-    if (retries > 0) {
-      console.warn(`Retrying... (${retries} attempts left)`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      return retry(fn, retries - 1, delay);
-    } else {
-      throw error;
-    }
-  }
-}
+await runExample('expose port', async () => {
+  await withSandbox('expose-port', {}, async (sandbox) => {
+    await sandbox.filesystem.write_file('/tmp/index.html', '<h1>Hello from Sandbox</h1>');
+    const processId = await sandbox.launch_process('python3 -m http.server 8080', { cwd: '/tmp' });
+    assert.ok(processId);
+    await sleep(2);
 
-async function main() {
-  console.log('\nCreating test file...');
-  await sandbox.filesystem.write_file('/tmp/test.html', '<h1>Hello from Sandbox!</h1><p>Port 8080</p>');
-  console.log('Test file created');
-
-  console.log('\nStarting HTTP server on port 8080...');
-  const process_id = await sandbox.launch_process('python3 -m http.server 8080', { cwd: '/tmp' });
-  console.log(`Server started with process ID: ${process_id}`);
-
-  console.log('Waiting for server to start...');
-  await new Promise((resolve) => setTimeout(resolve, 3000));
-
-  console.log('\nExposing port 8080...');
-  let exposed = await sandbox.expose_port(8080);
-  console.log(`Port exposed: ${exposed.port}`);
-  console.log(`Exposed at: ${exposed.exposed_at}`);
-
-  console.log('Waiting for port to be ready...');
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-
-  console.log('\nMaking HTTP request to verify port exposure...');
-  let res = await retry(() => fetch(`${exposed.exposed_at}/test.html`));
-
-  if (!res.ok) {
-    throw new Error(`Status: ${res.status}`);
-  }
-
-  console.log(`✓ Request successful! Status: ${res.status}`);
-  console.log(`✓ Response content: ${await res.text()}`);
-
-  console.log('\nRunning processes:');
-  const processes = await sandbox.list_processes();
-
-  for (const process of processes) {
-    if (process.status === 'running') {
-      console.log(`  ${process.id}: ${process.command} - ${process.status}`);
-    }
-  }
-
-  console.log('\nSwitching to port 8081...');
-  await sandbox.filesystem.write_file('/tmp/test2.html', '<h1>Hello from Sandbox!</h1><p>Port 8081</p>');
-  await sandbox.launch_process('python3 -m http.server 8081', { cwd: '/tmp' });
-
-  console.log('Waiting for server to start...');
-  await new Promise((resolve) => setTimeout(resolve, 3000));
-
-  exposed = await sandbox.expose_port(8081);
-  console.log(`Port exposed: ${exposed.port}`);
-  console.log(`Exposed at: ${exposed.exposed_at}`);
-
-  console.log('Waiting for port to be ready...');
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-
-  console.log('\nMaking HTTP request to verify port 8081...');
-  res = await retry(() => fetch(`${exposed.exposed_at}/test2.html`));
-
-  if (!res.ok) {
-    throw new Error(`Status: ${res.status}`);
-  }
-
-  console.log(`✓ Request successful! Status: ${res.status}`);
-  console.log(`✓ Response content: ${await res.text()}`);
-
-  console.log('\nUnexposing port...');
-  await sandbox.unexpose_port();
-  console.log('Port unexposed');
-}
-
-async function cleanup() {
-  await sandbox.delete();
-}
-
-main().catch(console.error).finally(cleanup);
+    const exposed = await sandbox.expose_port(8080);
+    assert.equal(exposed.port, 8080);
+    const response = await retry(async () => {
+      const result = await fetch(`${exposed.exposed_at}/index.html`);
+      if (!result.ok) throw new Error(`HTTP ${result.status}`);
+      return result;
+    });
+    assert.match(await response.text(), /Hello from Sandbox/);
+    await sandbox.unexpose_port(8080);
+  });
+});

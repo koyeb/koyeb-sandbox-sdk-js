@@ -8,6 +8,18 @@ export class SandboxError extends Error {
   }
 }
 
+export type SandboxCommandResult = { stdout: string; stderr: string; code: number };
+
+export class SandboxCommandError extends SandboxError {
+  constructor(
+    public readonly command: string,
+    public readonly result: SandboxCommandResult,
+  ) {
+    const output = result.stderr || result.stdout;
+    super(`Command '${command}' failed with exit code ${result.code}${output ? `: ${output}` : ''}`);
+  }
+}
+
 export class MissingApiTokenError extends SandboxError {
   constructor() {
     super('API token is required. Set KOYEB_API_TOKEN environment variable or pass api_token parameter');
@@ -50,7 +62,7 @@ export class SandboxConnectionError extends SandboxError {}
 
 export class NoSandboxSecretError extends SandboxError {
   constructor() {
-    super('The SANDBOX_SECRET environment variable is not set');
+    super('The sandbox handle has no executor secret. Use Sandbox.get_from_id(handle.id) before connected operations');
   }
 }
 

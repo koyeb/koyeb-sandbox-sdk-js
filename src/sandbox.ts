@@ -14,6 +14,8 @@ import {
   InvalidPortError,
   MissingApiTokenError,
   NoSandboxSecretError,
+  SandboxCommandError,
+  type SandboxCommandResult,
   SandboxConnectionError,
   SandboxDeploymentError,
   SandboxError,
@@ -26,8 +28,6 @@ import { handleServerSentEvents } from './server-sent-event.js';
 import { TypedEventTarget } from './typed-event-target.js';
 import {
   assert,
-  buildConfigFiles,
-  buildEnvVars,
   buildNetworkPolicy,
   Duration,
   getEnv,
@@ -35,7 +35,6 @@ import {
   isUndefined,
   omitUndefined,
   parseDuration,
-  randomString,
   wait,
   waitFor,
   buildDefinition,
@@ -76,6 +75,14 @@ export type CreateSandboxOptions = Partial<{
   enable_tcp_proxy: boolean;
   privileged: boolean;
   registry_secret?: string;
+  app_id: string;
+  project_id: string;
+  enable_mesh: boolean;
+  entrypoint: string[];
+  command: string;
+  args: string[];
+  snapshot: Snapshot | string;
+  sandbox_secret: string;
   delete_after_delay?: Duration;
   delete_after_inactivity_delay?: Duration;
   _experimental_enable_light_sleep: boolean;
@@ -87,6 +94,13 @@ export type CreateSandboxOptions = Partial<{
    * `block_network`.
    */
   outbound_allowlist: string[];
+}>;
+
+export type ListSandboxesOptions = Partial<{
+  app_id: string;
+  name: string;
+  api_token: string;
+  project_id: string;
 }>;
 
 export type SandboxExec = TypedEventTarget<{
@@ -105,6 +119,31 @@ export type SandboxProcess = {
 };
 
 export type SandboxProcessStatus = 'running' | 'completed' | 'failed' | 'killed';
+
+export const SnapshotType = {
+  FILESYSTEM: 'filesystem',
+  FULL: 'full',
+} as const;
+
+export type SnapshotType = (typeof SnapshotType)[keyof typeof SnapshotType];
+
+export const SnapshotStatus = {
+  INVALID: 'invalid',
+  CREATING: 'creating',
+  AVAILABLE: 'available',
+  DELETING: 'deleting',
+  DELETED: 'deleted',
+  FAILED: 'failed',
+} as const;
+
+export type SnapshotStatus = (typeof SnapshotStatus)[keyof typeof SnapshotStatus];
+
+export type DeclarativeSnapshotOptions = {
+  workdir?: string;
+  api_token?: string;
+  delete_builder?: boolean;
+  project_id?: string;
+};
 
 type ConnectionInfo = {
   public_url: string;
@@ -128,8 +167,9 @@ export class Sandbox {
     public readonly app_id: string,
     public readonly service_id: string,
     public readonly name: string,
-    private readonly sandbox_secret: string,
+    private readonly sandbox_secret: string | undefined,
     private readonly api_token?: string,
+    private readonly owns_app = true,
   ) {
     this.api = new KoyebApi(this.api_token);
   }
@@ -151,9 +191,19 @@ export class Sandbox {
   static async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
     const opts = { ...this.defaultCreateSandboxOptions, ...omitUndefined(options) };
     const token = opts.api_token ?? getEnv('KOYEB_API_TOKEN');
+    const projectId = opts.project_id || getEnv('KOYEB_PROJECT_ID') || undefined;
 
     if (!token) {
       throw new MissingApiTokenError();
+    }
+
+    const snapshot = opts.snapshot;
+    const snapshotId = typeof snapshot === 'string' ? snapshot : snapshot?.id;
+    const snapshotType = typeof snapshot === 'string' ? SnapshotType.FILESYSTEM : snapshot?.snapshot_type;
+    const snapshotSecret = typeof snapshot === 'string' ? undefined : snapshot?.sandbox_secret;
+
+    if (snapshotType === SnapshotType.FULL && snapshot && typeof snapshot !== 'string' && !snapshot.sandbox_secret) {
+      throw new SandboxError('A full snapshot requires its original sandbox secret');
     }
 
     const { definition, sandbox_secret } = buildDefinition({
@@ -165,16 +215,22 @@ export class Sandbox {
       config_files: opts.config_files,
       privileged: opts.privileged,
       registry_secret: opts.registry_secret,
+      entrypoint: opts.entrypoint,
+      command: opts.command,
+      args: opts.args,
       exposed_port_protocol: opts.exposed_port_protocol,
       enable_tcp_proxy: opts.enable_tcp_proxy,
+      enable_mesh: opts.enable_mesh,
       idle_timeout: opts.idle_timeout,
       _experimental_enable_light_sleep: opts._experimental_enable_light_sleep,
       block_network: opts.block_network,
       outbound_allowlist: opts.outbound_allowlist,
+      sandbox_secret: opts.sandbox_secret ?? snapshotSecret,
     });
 
-    const service = await this.createService(token, opts, definition);
-    const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, sandbox_secret, token);
+    const serviceDefinition = snapshotType === SnapshotType.FULL ? undefined : definition;
+    const { service, ownsApp } = await this.createService(token, opts, projectId, serviceDefinition, snapshotId);
+    const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, sandbox_secret, token, ownsApp);
 
     if (opts.wait_ready) {
       let ready: boolean;
@@ -204,28 +260,51 @@ export class Sandbox {
   private static async createService(
     token: string,
     opts: CreateSandboxOptions,
-    definition: koyeb.DeploymentDefinition,
+    projectId: string | undefined,
+    definition: koyeb.DeploymentDefinition | undefined,
+    snapshotId: string | undefined,
   ) {
     const api = new KoyebApi(token);
 
-    await api.createService({ app_id: '74140198-4d29-4a1e-bdc9-5cc2b355ccd0', definition }, { dry_run: true });
+    if (definition) {
+      await api.createService(
+        { app_id: opts.app_id ?? '74140198-4d29-4a1e-bdc9-5cc2b355ccd0', definition },
+        { dry_run: true },
+        projectId,
+      );
+    }
 
-    const app = await api.createApp({
-      name: `sandbox-app-${opts.name}-${Date.now()}`,
-      life_cycle: { delete_when_empty: true },
-    });
+    const ownsApp = !opts.app_id;
+    const app = opts.app_id
+      ? { id: opts.app_id }
+      : await api.createApp(
+          {
+            name: `sandbox-app-${opts.name}-${Date.now()}`,
+            life_cycle: { delete_when_empty: true },
+          },
+          projectId,
+        );
 
     try {
-      return await api.createService({
-        app_id: app.id,
-        definition,
-        life_cycle: {
-          delete_after_create: parseDuration(opts.delete_after_delay),
-          delete_after_sleep: parseDuration(opts.delete_after_inactivity_delay),
+      const service = await api.createService(
+        {
+          app_id: app.id,
+          definition,
+          instance_snapshot_id: snapshotId,
+          name: opts.name,
+          life_cycle: {
+            delete_after_create: parseDuration(opts.delete_after_delay),
+            delete_after_sleep: parseDuration(opts.delete_after_inactivity_delay),
+          },
         },
-      });
+        undefined,
+        projectId,
+      );
+      return { service, ownsApp };
     } catch (error) {
-      await api.deleteApp(app.id!);
+      if (ownsApp) {
+        await api.deleteApp(app.id!);
+      }
       throw error;
     }
   }
@@ -262,6 +341,60 @@ export class Sandbox {
     }
 
     return sandbox;
+  }
+
+  static async list(options: ListSandboxesOptions = {}): Promise<Sandbox[]> {
+    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
+    if (!token) {
+      throw new MissingApiTokenError();
+    }
+
+    const projectId = options.project_id ?? getEnv('KOYEB_PROJECT_ID') ?? undefined;
+    const api = new KoyebApi(token);
+    const sandboxes: Sandbox[] = [];
+    const limit = 100;
+    let offset = 0;
+
+    while (true) {
+      const page = await api.listServicesPage(
+        {
+          app_id: options.app_id,
+          name: options.name,
+          types: ['SANDBOX'],
+          limit: String(limit),
+          offset: String(offset),
+        },
+        projectId,
+      );
+      assert(page, new SandboxError('The sandbox service list response is empty'));
+      const services = page.services ?? [];
+
+      for (const service of services) {
+        assert(
+          service.id && service.app_id && service.name,
+          new SandboxError('A sandbox service list item is missing its id, app id, or name'),
+        );
+        sandboxes.push(new Sandbox(service.app_id, service.id, service.name, undefined, token, false));
+      }
+
+      offset += services.length;
+      if (services.length === 0 || page.has_next === false || (page.count !== undefined && offset >= page.count)) {
+        break;
+      }
+      if (page.has_next !== true && page.count === undefined && services.length < limit) {
+        break;
+      }
+    }
+
+    return sandboxes;
+  }
+
+  static create_from_snapshot(snapshot: Snapshot | string, options: CreateSandboxOptions = {}): Promise<Sandbox> {
+    return this.create({ ...options, snapshot });
+  }
+
+  static template(name: string, image: string, options: DeclarativeSnapshotOptions = {}): DeclarativeSnapshot {
+    return new DeclarativeSnapshot(name, image, options);
   }
 
   async wait_ready(
@@ -326,7 +459,7 @@ export class Sandbox {
       }
 
       const metadata = deployment.metadata?.sandbox;
-      if (!this._conn_info && metadata?.public_url && metadata.routing_key) {
+      if (!this._conn_info && metadata?.public_url && metadata.routing_key && this.sandbox_secret) {
         this._conn_info = {
           public_url: `${metadata.public_url}/koyeb-sandbox`,
           routing_key: metadata.routing_key,
@@ -443,13 +576,16 @@ export class Sandbox {
       return this._conn_info;
     }
 
+    const sandboxSecret = this.sandbox_secret;
+    assert(sandboxSecret, new NoSandboxSecretError());
+
     const metadata = await this.get_metadata_connection_info();
 
     if (metadata) {
       this._conn_info = {
         public_url: `${metadata.public_url}/koyeb-sandbox`,
         routing_key: metadata.routing_key,
-        secret: this.sandbox_secret,
+        secret: sandboxSecret,
       };
       return this._conn_info;
     }
@@ -457,7 +593,7 @@ export class Sandbox {
     const domain = await this.get_domain_from_app();
     this._conn_info = {
       public_url: `https://${domain}/koyeb-sandbox`,
-      secret: this.sandbox_secret,
+      secret: sandboxSecret,
     };
     return this._conn_info;
   }
@@ -539,7 +675,39 @@ export class Sandbox {
   }
 
   async delete(): Promise<void> {
-    await this.api.deleteApp(this.app_id);
+    if (this.owns_app) {
+      await this.api.deleteApp(this.app_id);
+    } else {
+      await this.api.deleteService(this.service_id);
+    }
+  }
+
+  async snapshot(
+    name: string,
+    snapshotType: SnapshotType = SnapshotType.FILESYSTEM,
+    waitAvailable = true,
+    timeout = 600,
+  ): Promise<Snapshot> {
+    const instances = await this.api.listInstances({
+      service_id: this.service_id,
+      statuses: ['HEALTHY', 'STARTING', 'ALLOCATING'],
+      limit: '1',
+    });
+    const instanceId = instances[0]?.id;
+    assert(instanceId, new SandboxError(`No running instance found for sandbox '${this.name}'`));
+
+    const rawSnapshot = await this.api.createInstanceSnapshot({
+      instance_id: instanceId,
+      name,
+      type: snapshotTypeToApi(snapshotType),
+    });
+    const snapshot = Snapshot.fromApi(rawSnapshot, this.api_token, this.sandbox_secret);
+
+    if (waitAvailable && !(await snapshot.wait_available(timeout))) {
+      throw new SandboxTimeoutError(`snapshot ${name}`, timeout);
+    }
+
+    return snapshot;
   }
 
   private async performRequest<T>(
@@ -688,9 +856,25 @@ export class Sandbox {
       env,
       signal,
       timeout = DEFAULT_HTTP_TIMEOUT,
-    }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal; timeout?: number } = {},
-  ): Promise<{ stdout: string; stderr: string; code: number }> {
-    return this.request('/run', { method: 'POST', signal }, { cmd, cwd, env }, { timeout });
+      raise_on_error = false,
+    }: {
+      cwd?: string;
+      env?: Record<string, string>;
+      signal?: AbortSignal;
+      timeout?: number;
+      raise_on_error?: boolean;
+    } = {},
+  ): Promise<SandboxCommandResult> {
+    const result: SandboxCommandResult = await this.request(
+      '/run',
+      { method: 'POST', signal },
+      { cmd, cwd, env },
+      { timeout },
+    );
+    if (raise_on_error && result.code !== 0) {
+      throw new SandboxCommandError(cmd, result);
+    }
+    return result;
   }
 
   exec_stream(
@@ -787,5 +971,247 @@ export class Sandbox {
     }
 
     return count;
+  }
+}
+
+function snapshotTypeToApi(type: SnapshotType): koyeb.InstanceSnapshotType {
+  return type === SnapshotType.FULL ? 'INSTANCE_SNAPSHOT_TYPE_FULL' : 'INSTANCE_SNAPSHOT_TYPE_FILESYSTEM';
+}
+
+function snapshotTypeFromApi(type?: koyeb.InstanceSnapshotType): SnapshotType {
+  return type === 'INSTANCE_SNAPSHOT_TYPE_FULL' ? SnapshotType.FULL : SnapshotType.FILESYSTEM;
+}
+
+function snapshotStatusFromApi(status?: koyeb.InstanceSnapshotStatus): SnapshotStatus {
+  const statuses: Partial<Record<koyeb.InstanceSnapshotStatus, SnapshotStatus>> = {
+    INSTANCE_SNAPSHOT_STATUS_CREATING: SnapshotStatus.CREATING,
+    INSTANCE_SNAPSHOT_STATUS_AVAILABLE: SnapshotStatus.AVAILABLE,
+    INSTANCE_SNAPSHOT_STATUS_ERROR: SnapshotStatus.FAILED,
+    INSTANCE_SNAPSHOT_STATUS_DELETING: SnapshotStatus.DELETING,
+    INSTANCE_SNAPSHOT_STATUS_DELETED: SnapshotStatus.DELETED,
+  };
+  return status ? (statuses[status] ?? SnapshotStatus.INVALID) : SnapshotStatus.INVALID;
+}
+
+export class Snapshot {
+  public operations: string[] = [];
+
+  private constructor(
+    public readonly id: string,
+    public name: string,
+    public readonly service_id: string,
+    public snapshot_type: SnapshotType,
+    public status: SnapshotStatus,
+    public created_at: Date,
+    public deployment_id: string | undefined,
+    public available_at: Date | undefined,
+    public readonly organization_id: string,
+    public readonly project_id: string | undefined,
+    public messages: string[],
+    private readonly api_token?: string,
+    public readonly sandbox_secret?: string,
+  ) {}
+
+  static fromApi(snapshot: koyeb.InstanceSnapshot, apiToken?: string, sandboxSecret?: string): Snapshot {
+    assert(snapshot.id, new SandboxError('Snapshot response has no ID'));
+    return new Snapshot(
+      snapshot.id,
+      snapshot.name ?? '',
+      snapshot.service_id ?? '',
+      snapshotTypeFromApi(snapshot.type),
+      snapshotStatusFromApi(snapshot.status),
+      snapshot.created_at ? new Date(snapshot.created_at) : new Date(),
+      snapshot.deployment_id,
+      snapshot.available_at ? new Date(snapshot.available_at) : undefined,
+      snapshot.organization_id ?? '',
+      snapshot.project_id,
+      snapshot.messages ?? [],
+      apiToken,
+      sandboxSecret,
+    );
+  }
+
+  static async get(snapshotId: string, apiToken?: string): Promise<Snapshot> {
+    const token = apiToken ?? getEnv('KOYEB_API_TOKEN');
+    if (!token) {
+      throw new MissingApiTokenError();
+    }
+    return Snapshot.fromApi(await new KoyebApi(token).getInstanceSnapshot(snapshotId), token);
+  }
+
+  static async list(
+    options: {
+      name?: string;
+      snapshot_type?: SnapshotType;
+      status?: SnapshotStatus;
+      limit?: number;
+      offset?: number;
+      api_token?: string;
+    } = {},
+  ): Promise<Snapshot[]> {
+    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
+    if (!token) {
+      throw new MissingApiTokenError();
+    }
+
+    const statusMap: Partial<Record<SnapshotStatus, koyeb.InstanceSnapshotStatus>> = {
+      [SnapshotStatus.CREATING]: 'INSTANCE_SNAPSHOT_STATUS_CREATING',
+      [SnapshotStatus.AVAILABLE]: 'INSTANCE_SNAPSHOT_STATUS_AVAILABLE',
+      [SnapshotStatus.FAILED]: 'INSTANCE_SNAPSHOT_STATUS_ERROR',
+      [SnapshotStatus.DELETING]: 'INSTANCE_SNAPSHOT_STATUS_DELETING',
+      [SnapshotStatus.DELETED]: 'INSTANCE_SNAPSHOT_STATUS_DELETED',
+    };
+    const status = options.status ? statusMap[options.status] : undefined;
+    const snapshots = await new KoyebApi(token).listInstanceSnapshots({
+      name: options.name,
+      type: options.snapshot_type ? snapshotTypeToApi(options.snapshot_type) : undefined,
+      statuses: status ? [status] : undefined,
+      limit: String(options.limit ?? 50),
+      offset: String(options.offset ?? 0),
+    });
+    return snapshots.map((snapshot) => Snapshot.fromApi(snapshot, token));
+  }
+
+  async refresh(): Promise<void> {
+    const token = this.api_token ?? getEnv('KOYEB_API_TOKEN');
+    if (!token) {
+      throw new MissingApiTokenError();
+    }
+    const updated = Snapshot.fromApi(
+      await new KoyebApi(token).getInstanceSnapshot(this.id),
+      token,
+      this.sandbox_secret,
+    );
+    this.name = updated.name;
+    this.snapshot_type = updated.snapshot_type;
+    this.status = updated.status;
+    this.created_at = updated.created_at;
+    this.deployment_id = updated.deployment_id;
+    this.available_at = updated.available_at;
+    this.messages = updated.messages;
+  }
+
+  async wait_available(timeout = 600, pollInterval = 5): Promise<boolean> {
+    const startedAt = Date.now();
+    while ((Date.now() - startedAt) / 1_000 < timeout) {
+      await this.refresh();
+      if (this.status === SnapshotStatus.AVAILABLE) return true;
+      if (this.status === SnapshotStatus.FAILED) return false;
+      await wait(pollInterval * 1_000);
+    }
+    return false;
+  }
+
+  async delete(): Promise<void> {
+    const token = this.api_token ?? getEnv('KOYEB_API_TOKEN');
+    if (!token) {
+      throw new MissingApiTokenError();
+    }
+    await new KoyebApi(token).deleteInstanceSnapshot(this.id);
+  }
+
+  async spawn(options: CreateSandboxOptions = {}): Promise<Sandbox> {
+    return Sandbox.create({
+      ...options,
+      api_token: options.api_token ?? this.api_token,
+      project_id: options.project_id ?? this.project_id,
+      sandbox_secret: options.sandbox_secret ?? this.sandbox_secret,
+      snapshot: this,
+    });
+  }
+}
+
+export class DeclarativeSnapshot {
+  private readonly files = new Map<string, string>();
+  private readonly copies: Array<{ source: string; destination: string }> = [];
+  private readonly commands: Array<{ command: string; cwd?: string }> = [];
+
+  constructor(
+    private readonly name: string,
+    private readonly image: string,
+    private readonly options: DeclarativeSnapshotOptions = {},
+  ) {}
+
+  file(path: string, content: string): DeclarativeSnapshot {
+    this.files.set(path, content);
+    return this;
+  }
+
+  copy(source: string, destination: string): DeclarativeSnapshot {
+    this.copies.push({ source, destination });
+    return this;
+  }
+
+  run(command: string, cwd?: string): DeclarativeSnapshot {
+    this.commands.push({ command, cwd });
+    return this;
+  }
+
+  async build(snapshotName = this.name): Promise<Snapshot> {
+    const builder = await Sandbox.create({
+      image: this.image,
+      name: `builder-${this.name}`,
+      api_token: this.options.api_token,
+      project_id: this.options.project_id,
+    });
+    const operations: string[] = [];
+
+    try {
+      if (this.options.workdir) {
+        await builder.filesystem.mkdir(this.options.workdir, true);
+        operations.push(`set_workdir: ${this.options.workdir}`);
+      }
+
+      for (const [path, content] of this.files) {
+        const destination =
+          path.startsWith('/') || !this.options.workdir ? path : `${this.options.workdir.replace(/\/$/, '')}/${path}`;
+        await builder.filesystem.write_file(destination, content);
+        operations.push(`create_file: ${destination}`);
+      }
+
+      for (const copy of this.copies) {
+        const fs = await import('node:fs/promises');
+        const path = await import('node:path');
+        const stat = await fs.stat(copy.source);
+        const destination =
+          copy.destination.startsWith('/') || !this.options.workdir
+            ? copy.destination
+            : `${this.options.workdir.replace(/\/$/, '')}/${copy.destination}`;
+        if (stat.isDirectory()) {
+          const copyDirectory = async (source: string, destination: string): Promise<void> => {
+            await builder.filesystem.mkdir(destination, true);
+            for (const entry of await fs.readdir(source, { withFileTypes: true })) {
+              const sourcePath = path.join(source, entry.name);
+              const destinationPath = path.posix.join(destination, entry.name);
+              if (entry.isDirectory()) {
+                await copyDirectory(sourcePath, destinationPath);
+              } else {
+                await builder.filesystem.write_file(destinationPath, await fs.readFile(sourcePath, 'utf8'));
+              }
+            }
+          };
+          await copyDirectory(copy.source, destination);
+        } else {
+          await builder.filesystem.write_file(destination, await fs.readFile(copy.source, 'utf8'));
+        }
+        operations.push(`copy: ${copy.source} -> ${destination}`);
+      }
+
+      for (const command of this.commands) {
+        const result = await builder.exec(command.command, { cwd: command.cwd ?? this.options.workdir, timeout: 300 });
+        if (result.code !== 0) {
+          throw new SandboxError(`Snapshot build command failed: ${command.command}\n${result.stderr}`);
+        }
+        operations.push(`run: ${command.command}`);
+      }
+
+      const snapshot = await builder.snapshot(snapshotName);
+      snapshot.operations = operations;
+      return snapshot;
+    } finally {
+      if (this.options.delete_builder !== false) {
+        await builder.delete();
+      }
+    }
   }
 }

@@ -339,12 +339,17 @@ export type DefinitionOptions = Partial<{
   config_files: Record<string, EnvValue | ConfigFile>;
   privileged: boolean;
   registry_secret: string;
+  entrypoint: string[];
+  command: string;
+  args: string[];
   exposed_port_protocol: 'http' | 'http2';
   enable_tcp_proxy: boolean;
+  enable_mesh: boolean;
   idle_timeout: number;
   _experimental_enable_light_sleep: boolean;
   block_network: boolean;
   outbound_allowlist: string[];
+  sandbox_secret: string;
 }>;
 
 /**
@@ -365,6 +370,9 @@ export function buildDefinition(opts: DefinitionOptions): {
       image: opts.image,
       privileged: opts.privileged,
       image_registry_secret: opts.registry_secret,
+      entrypoint: opts.entrypoint,
+      command: opts.command,
+      args: opts.args,
     },
     instance_types: [{ type: opts.instance_type }],
     regions: [opts.region ?? getEnv('KOYEB_REGION') ?? 'na'],
@@ -378,7 +386,11 @@ export function buildDefinition(opts: DefinitionOptions): {
     ],
   };
 
-  const sandbox_secret = randomString(32);
+  if (isDefined(opts.enable_mesh)) {
+    definition.mesh = opts.enable_mesh ? 'DEPLOYMENT_MESH_ENABLED' : 'DEPLOYMENT_MESH_DISABLED';
+  }
+
+  const sandbox_secret = opts.sandbox_secret ?? randomString(32);
 
   definition.env = [{ key: 'SANDBOX_SECRET', value: sandbox_secret }, ...buildEnvVars(opts.env)];
 

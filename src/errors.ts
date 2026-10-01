@@ -28,6 +28,17 @@ export class SandboxTimeoutError extends Error {
   }
 }
 
+export class SandboxDeploymentError extends Error {
+  constructor(
+    public readonly sandbox_name: string,
+    public readonly status: koyeb.DeploymentStatus,
+  ) {
+    super(
+      `Sandbox '${sandbox_name}' deployment reached status ${status}: it will not become ready; wake or redeploy the sandbox.`,
+    );
+  }
+}
+
 export class NoSandboxSecretError extends Error {
   constructor() {
     super('The SANDBOX_SECRET environment variable is not set');

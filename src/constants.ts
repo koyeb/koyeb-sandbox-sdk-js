@@ -2,6 +2,9 @@ export const DEFAULT_API_HOST = 'https://app.koyeb.com';
 export const DEFAULT_WAIT_TIMEOUT = 300;
 export const DEFAULT_IDLE_TIMEOUT = 300;
 export const DEFAULT_POLL_INTERVAL = 2;
+// wait_ready polls with backoff: from READY_POLL_INITIAL_INTERVAL, doubling up to DEFAULT_READY_POLL_INTERVAL.
+export const READY_POLL_INITIAL_INTERVAL = 0.1;
+export const DEFAULT_READY_POLL_INTERVAL = 0.5;
 export const PORT_MIN = 1;
 export const PORT_MAX = 65535;
 

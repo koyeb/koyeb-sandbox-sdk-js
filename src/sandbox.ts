@@ -1,9 +1,18 @@
 import { koyeb, KoyebApi } from './api.js';
-import { DEFAULT_IDLE_TIMEOUT, DEFAULT_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT, PORT_MAX, PORT_MIN } from './constants.js';
+import {
+  DEFAULT_IDLE_TIMEOUT,
+  DEFAULT_POLL_INTERVAL,
+  DEFAULT_READY_POLL_INTERVAL,
+  DEFAULT_WAIT_TIMEOUT,
+  PORT_MAX,
+  PORT_MIN,
+  READY_POLL_INITIAL_INTERVAL,
+} from './constants.js';
 import {
   InvalidPortError,
   MissingApiTokenError,
   NoSandboxSecretError,
+  SandboxDeploymentError,
   SandboxRequestError,
   SandboxTimeoutError,
 } from './errors.js';
@@ -22,6 +31,7 @@ import {
   omitUndefined,
   parseDuration,
   randomString,
+  wait,
   waitFor,
   buildDefinition,
 } from './utils.js';
@@ -96,10 +106,41 @@ type ConnectionInfo = {
   secret: string;
 };
 
+/**
+ * Deployment-status classification for readiness, failing closed: `HEALTHY` and `DEGRADED` are ready, the
+ * pre-ready states are in progress, and every other state (including `SLEEPING`, `STASHED` and unknown values)
+ * will not become ready on its own during a wait.
+ */
+function classifyDeploymentStatus(status: koyeb.DeploymentStatus): 'ready' | 'in_progress' | 'terminal_failure' {
+  switch (status) {
+    case 'HEALTHY':
+    case 'DEGRADED':
+      return 'ready';
+    case 'PENDING':
+    case 'PROVISIONING':
+    case 'SCHEDULED':
+    case 'ALLOCATING':
+    case 'STARTING':
+      return 'in_progress';
+    default:
+      return 'terminal_failure';
+  }
+}
+
+/** The gateway URL and routing key the platform publishes in the deployment metadata, when present. */
+function metadataConnectionInfo(deployment: koyeb.Deployment): { public_url: string; routing_key: string } | undefined {
+  const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)?.sandbox;
+
+  if (sandbox?.public_url && sandbox?.routing_key) {
+    return { public_url: sandbox.public_url, routing_key: sandbox.routing_key };
+  }
+}
+
 export class Sandbox {
   private readonly api: KoyebApi;
   private _conn_info?: ConnectionInfo;
   private _domain?: string;
+  private _deployment_id?: string;
 
   constructor(
     public readonly app_id: string,
@@ -152,6 +193,7 @@ export class Sandbox {
 
     const service = await this.createService(token, opts, definition);
     const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, sandbox_secret, token);
+    sandbox._deployment_id = service.latest_deployment_id;
 
     if (opts.wait_ready) {
       let ready: boolean;
@@ -184,8 +226,6 @@ export class Sandbox {
     definition: koyeb.DeploymentDefinition,
   ) {
     const api = new KoyebApi(token);
-
-    await api.createService({ app_id: '74140198-4d29-4a1e-bdc9-5cc2b355ccd0', definition }, { dry_run: true });
 
     const app = await api.createApp({
       name: `sandbox-app-${opts.name}-${Date.now()}`,
@@ -222,15 +262,49 @@ export class Sandbox {
 
     assert(secret?.value, new NoSandboxSecretError());
 
-    return new Sandbox(service.app_id!, service.id!, service.name!, secret.value, token);
+    const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, secret.value, token);
+    sandbox._deployment_id = deployment.id;
+    sandbox.cache_conn_info(deployment);
+
+    return sandbox;
   }
 
+  /**
+   * Waits for the deployment to be HEALTHY, then for the executor's `/health` to answer. Both are polled with
+   * backoff, from 0.1 s doubling up to `pollInterval` seconds. Probing the gateway before HEALTHY would not
+   * help: the sandbox's address is not published yet, and a lookup that fails can be cached for a few seconds.
+   *
+   * Resolves `true` once ready and `false` on timeout or abort. Throws `SandboxDeploymentError` as soon as the
+   * deployment reaches a status that will not become ready (e.g. `ERROR`, `STOPPED`, `SLEEPING`).
+   */
   async wait_ready(
     timeout = DEFAULT_WAIT_TIMEOUT,
-    pollInterval = DEFAULT_POLL_INTERVAL,
+    pollInterval = DEFAULT_READY_POLL_INTERVAL,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    return waitFor(() => this.is_healthy(), timeout, pollInterval, signal);
+    const start = Date.now();
+    let interval = Math.min(READY_POLL_INITIAL_INTERVAL, pollInterval);
+    let deployment_healthy = false;
+
+    do {
+      // An already-aborted signal never fires wait()'s listener: stop up front.
+      if (signal?.aborted) {
+        return false;
+      }
+
+      if (!deployment_healthy) {
+        deployment_healthy = await this.is_deployment_healthy();
+      }
+
+      if (deployment_healthy && (await this.is_executor_healthy())) {
+        return true;
+      }
+
+      await wait(interval * 1_000, signal);
+      interval = Math.min(interval * 2, pollInterval);
+    } while (Date.now() - start < timeout * 1_000);
+
+    return false;
   }
 
   async wait_tcp_proxy_ready(
@@ -252,6 +326,73 @@ export class Sandbox {
     const response = await fetch(`${conn.public_url}/health`, { headers });
 
     return response.ok;
+  }
+
+  private async resolve_deployment_id(): Promise<string | undefined> {
+    if (!this._deployment_id) {
+      const service = await this.api.getService(this.service_id);
+      this._deployment_id = service.active_deployment_id || service.latest_deployment_id;
+    }
+
+    return this._deployment_id;
+  }
+
+  /** Whether the deployment is HEALTHY; API errors count as not yet. Caches the connection info once healthy. */
+  private async is_deployment_healthy(): Promise<boolean> {
+    let deployment: koyeb.Deployment;
+
+    try {
+      const deploymentId = await this.resolve_deployment_id();
+
+      if (!deploymentId) {
+        return false;
+      }
+
+      deployment = await this.api.getDeployment(deploymentId);
+    } catch {
+      return false;
+    }
+
+    if (isUndefined(deployment.status)) {
+      return false;
+    }
+
+    const classification = classifyDeploymentStatus(deployment.status);
+
+    if (classification === 'terminal_failure') {
+      throw new SandboxDeploymentError(this.name, deployment.status);
+    }
+
+    if (classification === 'ready') {
+      this.cache_conn_info(deployment);
+      return true;
+    }
+
+    return false;
+  }
+
+  /** Whether the executor answers `/health`; a network error counts as not ready. */
+  private async is_executor_healthy(): Promise<boolean> {
+    try {
+      const response = await this.fetch('/health', { method: 'GET' });
+      // Read the body so the connection goes back to the pool for the next request.
+      await response.arrayBuffer();
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private cache_conn_info(deployment: koyeb.Deployment) {
+    const metadata = metadataConnectionInfo(deployment);
+
+    if (!this._conn_info && metadata) {
+      this._conn_info = {
+        public_url: `${metadata.public_url}/koyeb-sandbox`,
+        routing_key: metadata.routing_key,
+        secret: this.sandbox_secret,
+      };
+    }
   }
 
   async get_tcp_proxy_info(): Promise<[host: string, public_port: number] | undefined> {
@@ -306,12 +447,7 @@ export class Sandbox {
       const deploymentId = service.active_deployment_id || service.latest_deployment_id;
       if (!deploymentId) return;
 
-      const deployment = await this.api.getDeployment(deploymentId);
-      const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)?.sandbox;
-
-      if (sandbox?.public_url && sandbox?.routing_key) {
-        return { public_url: sandbox.public_url, routing_key: sandbox.routing_key };
-      }
+      return metadataConnectionInfo(await this.api.getDeployment(deploymentId));
     } catch {
       return;
     }
@@ -358,13 +494,16 @@ export class Sandbox {
     const service = await this.api.getService(this.service_id);
     const deployment = await this.api.getDeployment(service.latest_deployment_id!);
 
-    await this.api.updateService(this.service_id, {
+    const updated = await this.api.updateService(this.service_id, {
       definition: deployment.definition,
       life_cycle: {
         delete_after_create: parseDuration(values?.delete_after_delay),
         delete_after_sleep: parseDuration(values?.delete_after_inactivity_delay),
       },
     });
+
+    // The update redeploys: later readiness checks follow the new deployment.
+    this._deployment_id = updated.latest_deployment_id;
   }
 
   /**
@@ -389,9 +528,12 @@ export class Sandbox {
     const service = await this.api.getService(this.service_id);
     const deployment = await this.api.getDeployment(service.latest_deployment_id!);
 
-    await this.api.updateService(this.service_id, {
+    const updated = await this.api.updateService(this.service_id, {
       definition: { ...deployment.definition, network_policy },
     });
+
+    // The update redeploys: later readiness checks follow the new deployment.
+    this._deployment_id = updated.latest_deployment_id;
   }
 
   async delete(): Promise<void> {

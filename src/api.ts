@@ -1,8 +1,9 @@
 import * as koyeb from '@koyeb/api-client-js';
 import { DEFAULT_API_HOST, DEFAULT_CLAIM_ATTEMPTS, DEFAULT_CLAIM_RETRY_DELAY_MS } from './constants.js';
 import { formatRequest, formatResponse } from './format.js';
-import { assert, getEnv, wait } from './utils.js';
-import { ServicePoolError } from './errors.js';
+import { assert, getEnv } from './prelude.js';
+import { wait } from './time.js';
+import { SandboxApiError, ServicePoolError } from './errors.js';
 
 export type { koyeb };
 
@@ -20,17 +21,19 @@ export class KoyebApi {
   constructor(
     private readonly token?: string,
     private readonly debug = process.env.KOYEB_DEBUG === 'true',
+    host?: string,
   ) {
-    this.baseUrl = getEnv('KOYEB_API_HOST') ?? DEFAULT_API_HOST;
+    this.baseUrl = host ?? getEnv('KOYEB_API_HOST') ?? DEFAULT_API_HOST;
   }
 
-  private async api<T extends { error: Error } | { data: unknown }>(
+  private async api<T extends { error: unknown } | { data: unknown }>(
     promise: Promise<T>,
   ): Promise<T extends { data: infer R } ? R : never> {
     const result = await promise;
 
     if ('error' in result) {
-      throw result.error;
+      const response = (result as { response?: Response }).response;
+      throw new SandboxApiError(response?.status ?? 0, result.error);
     }
 
     return result.data as any;
@@ -81,6 +84,12 @@ export class KoyebApi {
     return response!.services!;
   }
 
+  /** Full list reply with the total count, for paginating over every service. */
+  async listServicesPage(query: Query<'listServices'>) {
+    const response = await this.api(koyeb.listServices({ ...this.params, query }));
+    return { services: response!.services ?? [], count: response!.count ?? 0 };
+  }
+
   async getService(id: string) {
     const response = await this.api(koyeb.getService({ ...this.params, path: { id } }));
     return response!.service!;
@@ -115,7 +124,17 @@ export class KoyebApi {
     await this.api(koyeb.deleteSecret({ ...this.params, path: { id } }));
   }
 
-  async claim(body: Body<'claim'>): Promise<koyeb.PoolClaimReply> {
+  /**
+   * Claim with the Python reference's retry policy: 429/5xx only, linear
+   * backoff (delay × attempt), the same body (request_id) on every attempt.
+   */
+  async claim(
+    body: Body<'claim'>,
+    policy: { maxAttempts?: number; retryDelaySeconds?: number } = {},
+  ): Promise<koyeb.PoolClaimReply> {
+    const maxAttempts = policy.maxAttempts ?? DEFAULT_CLAIM_ATTEMPTS;
+    const retryDelayMs =
+      policy.retryDelaySeconds !== undefined ? policy.retryDelaySeconds * 1_000 : DEFAULT_CLAIM_RETRY_DELAY_MS;
     let attempt = 1;
 
     for (; ;) {
@@ -124,11 +143,16 @@ export class KoyebApi {
       if (result.error !== undefined) {
         const status = result.response?.status;
 
-        if (attempt >= DEFAULT_CLAIM_ATTEMPTS || !isRetryableClaimStatus(status)) {
-          throw result.error;
+        if (attempt >= maxAttempts || !isRetryableClaimStatus(status)) {
+          // API failures join the SDK taxonomy like every other endpoint;
+          // transport failures (no response) propagate raw.
+          if (status === undefined) {
+            throw result.error;
+          }
+          throw new SandboxApiError(status, result.error);
         }
 
-        await wait(DEFAULT_CLAIM_RETRY_DELAY_MS * attempt);
+        await wait(retryDelayMs * attempt);
         attempt += 1;
         continue;
       }
@@ -182,9 +206,41 @@ export class KoyebApi {
     const response = await this.api(koyeb.listClaim({ ...this.params, path: { pool_id: poolId }, query }));
     return response!.claims ?? [];
   }
+
+  async listDeployments(query?: Query<'listDeployments'>) {
+    const response = await this.api(koyeb.listDeployments({ ...this.params, query }));
+    return response!.deployments ?? [];
+  }
+
+  async listInstances(query?: Query<'listInstances'>) {
+    const response = await this.api(koyeb.listInstances({ ...this.params, query }));
+    return response!.instances ?? [];
+  }
+
+  async createInstanceSnapshot(body: Body<'createInstanceSnapshot'>) {
+    const response = await this.api(koyeb.createInstanceSnapshot({ ...this.params, body }));
+    return response!.instance_snapshot!;
+  }
+
+  async getInstanceSnapshot(id: string) {
+    const response = await this.api(koyeb.getInstanceSnapshot({ ...this.params, path: { id } }));
+    return response!.instance_snapshot!;
+  }
+
+  async listInstanceSnapshots(query?: Query<'listInstanceSnapshots'>) {
+    const response = await this.api(koyeb.listInstanceSnapshots({ ...this.params, query }));
+    return response!.instance_snapshots ?? [];
+  }
+
+  async deleteInstanceSnapshot(id: string) {
+    const response = await this.api(koyeb.deleteInstanceSnapshot({ ...this.params, path: { id } }));
+    return response!.instance_snapshot!;
+  }
 }
 
-// Claiming is idempotent per (pool_id, request_id): only transient failures (no response, 429, 5xx) are retried.
+// Claiming is idempotent per (pool_id, request_id): only HTTP 429 and 5xx
+// responses are retried (Python parity); failures without a status — e.g.
+// network errors — surface immediately.
 function isRetryableClaimStatus(status: number | undefined) {
-  return status === undefined || status === 429 || status >= 500;
+  return status === 429 || (status !== undefined && status >= 500);
 }

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SandboxDeploymentError } from './errors.js';
 import { Sandbox } from './sandbox.js';
+import { completeEvent, sseResponse } from './test-support.js';
 
 // --- Fake fetch (system-boundary seam: the Koyeb public API and the sandbox gateway) ---
 
@@ -157,6 +158,38 @@ describe('Sandbox.create', () => {
   });
 });
 
+describe('Sandbox.update_lifecycle', () => {
+  it('pins the deployment its update creates, so a later wait_ready follows it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'Date'] });
+    const { fetch, calls } = fakeFetch({
+      'GET /v1/services/svc-1': [jsonResponse({ service: service() })],
+      'GET /v1/deployments/dep-1': [jsonResponse({ deployment: deployment('HEALTHY') })],
+      'PUT /v1/services/svc-1': [jsonResponse({ service: service({ latest_deployment_id: 'dep-2' }) })],
+      'GET /v1/deployments/dep-2': [jsonResponse({ deployment: deployment('HEALTHY', { id: 'dep-2' }) })],
+      'GET /koyeb-sandbox/health': [jsonResponse({ status: 'ok' })],
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    const sandbox = await Sandbox.get_from_id('svc-1', 'token');
+    await sandbox.update_lifecycle({ delete_after_delay: 600 });
+
+    const pending = sandbox.wait_ready();
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(pending).resolves.toBe(true);
+    // wait_ready polls the pinned dep-2, not the superseded dep-1.
+    expect(keys(calls)).toEqual([
+      'GET /v1/services/svc-1',
+      'GET /v1/deployments/dep-1',
+      'GET /v1/services/svc-1',
+      'GET /v1/deployments/dep-1',
+      'PUT /v1/services/svc-1',
+      'GET /v1/deployments/dep-2',
+      'GET /koyeb-sandbox/health',
+    ]);
+  });
+});
+
 describe('Sandbox.wait_ready', () => {
   function handle() {
     return new Sandbox('app-1', 'svc-1', 'sb', 'secret-1', 'token');
@@ -277,16 +310,20 @@ describe('Sandbox.get_from_id', () => {
     const { fetch, calls } = fakeFetch({
       'GET /v1/services/svc-1': [jsonResponse({ service: service() })],
       'GET /v1/deployments/dep-1': [jsonResponse({ deployment: deployment('HEALTHY') })],
-      'POST /koyeb-sandbox/run': [jsonResponse({ stdout: '', stderr: '', code: 0 })],
+      'POST /koyeb-sandbox/run_streaming': [sseResponse([completeEvent({ code: 0, error: false })])],
     });
     vi.stubGlobal('fetch', fetch);
 
     const sandbox = await Sandbox.get_from_id('svc-1', 'token');
     await sandbox.exec('true');
 
-    expect(keys(calls)).toEqual(['GET /v1/services/svc-1', 'GET /v1/deployments/dep-1', 'POST /koyeb-sandbox/run']);
+    expect(keys(calls)).toEqual([
+      'GET /v1/services/svc-1',
+      'GET /v1/deployments/dep-1',
+      'POST /koyeb-sandbox/run_streaming',
+    ]);
     const run = calls[2];
-    expect(run.url).toBe(`${GATEWAY}/koyeb-sandbox/run`);
+    expect(run.url).toBe(`${GATEWAY}/koyeb-sandbox/run_streaming`);
     expect(run.headers.get('X-Routing-Key')).toBe('ns:svc-1');
     expect(run.headers.get('Authorization')).toBe('Bearer secret-1');
   });
@@ -298,7 +335,7 @@ describe('Sandbox.get_from_id', () => {
         jsonResponse({ deployment: deployment('STARTING', { metadata: {} }) }),
         jsonResponse({ deployment: deployment('HEALTHY') }),
       ],
-      'POST /koyeb-sandbox/run': [jsonResponse({ stdout: '', stderr: '', code: 0 })],
+      'POST /koyeb-sandbox/run_streaming': [sseResponse([completeEvent({ code: 0, error: false })])],
     });
     vi.stubGlobal('fetch', fetch);
 
@@ -308,9 +345,8 @@ describe('Sandbox.get_from_id', () => {
     expect(keys(calls)).toEqual([
       'GET /v1/services/svc-1',
       'GET /v1/deployments/dep-1',
-      'GET /v1/services/svc-1',
       'GET /v1/deployments/dep-1',
-      'POST /koyeb-sandbox/run',
+      'POST /koyeb-sandbox/run_streaming',
     ]);
   });
 

@@ -1,60 +1,38 @@
 import { koyeb, KoyebApi } from './api.js';
 import {
   DEFAULT_IDLE_TIMEOUT,
+  DEFAULT_INSTANCE_WAIT_TIMEOUT,
   DEFAULT_POLL_INTERVAL,
-  DEFAULT_READY_POLL_INTERVAL,
+  DEFAULT_SNAPSHOT_WAIT_TIMEOUT,
+  DEFAULT_WAIT_START_INTERVAL,
   DEFAULT_WAIT_TIMEOUT,
   PORT_MAX,
   PORT_MIN,
-  READY_POLL_INITIAL_INTERVAL,
 } from './constants.js';
 import {
   InvalidPortError,
-  MissingApiTokenError,
   NoSandboxSecretError,
   SandboxDeploymentError,
+  SandboxError,
   SandboxRequestError,
+  SandboxServiceError,
   SandboxTimeoutError,
 } from './errors.js';
 import { SandboxFilesystem } from './sandbox-filesystem.js';
-import { handleServerSentEvents } from './server-sent-event.js';
-import { TypedEventTarget } from './typed-event-target.js';
-import {
-  assert,
-  buildConfigFiles,
-  buildEnvVars,
-  buildNetworkPolicy,
-  Duration,
-  getEnv,
-  isDefined,
-  isUndefined,
-  omitUndefined,
-  parseDuration,
-  randomString,
-  wait,
-  waitFor,
-  buildDefinition,
-} from './utils.js';
+import { DeclarativeSnapshot, type TemplateOptions } from './declarative-snapshot.js';
+import type { Snapshot, SnapshotOptions, SnapshotType } from './snapshot.js';
+import { buildNetworkPolicy } from './cidr.js';
+import { resolveClient } from './credentials.js';
+import { CommandRunner } from './command-runner.js';
+import { ExecutorGateway } from './executor-gateway.js';
+import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
+import { type Duration, parseDuration } from './duration.js';
+import { assert, isDefined, isUndefined, omitUndefined } from './prelude.js';
+import { classifyDeploymentStatus } from './readiness.js';
+import { waitFor, waitForPhased } from './time.js';
 
-/**
- * Reference to a Koyeb secret by name. A full `koyeb.Secret` object also satisfies this
- * structurally (its `name` field is read at render time).
- */
-export type SecretRef = { name?: string };
-
-/**
- * A value usable in `env` or `config_files`.
- *
- * - `string`: passed verbatim. Server-side interpolation (`{{ X }}` and `{{ secret.foo }}`) still applies.
- * - `SecretRef` (e.g. `{ name: "my-secret" }` or a full `koyeb.Secret`): rendered as
- *   `"{{ secret.<name> }}"`.
- */
-export type EnvValue = string | SecretRef;
-
-/**
- * Config file with custom permissions. `content` accepts the same forms as env values.
- */
-export type ConfigFile = { content: EnvValue; permissions?: string };
+// Value types live with the definition module; re-exported for the public surface.
+export type { ConfigFile, EnvValue, SecretRef } from './definition.js';
 
 export type CreateSandboxOptions = Partial<{
   image: string;
@@ -74,6 +52,7 @@ export type CreateSandboxOptions = Partial<{
   delete_after_delay?: Duration;
   delete_after_inactivity_delay?: Duration;
   _experimental_enable_light_sleep: boolean;
+  _experimental_deep_sleep_value: number;
   /** If true, block all outbound network access from the sandbox. Mutually exclusive with `outbound_allowlist`. */
   block_network: boolean;
   /**
@@ -82,14 +61,31 @@ export type CreateSandboxOptions = Partial<{
    * `block_network`.
    */
   outbound_allowlist: string[];
+  /** Create the sandbox service inside an existing app instead of a new one (Python-SDK parity). */
+  app_id: string;
+  /** Override the image entrypoint (Python-SDK parity). */
+  entrypoint: string[];
+  /** Override the image command (Python-SDK parity). */
+  command: string;
+  /** Arguments passed to the command (Python-SDK parity). */
+  args: string[];
+  /** Tri-state mesh toggle: unset = platform default, true = ENABLED, false = DISABLED (Python-SDK parity). */
+  enable_mesh: boolean;
+  /** Target API host, overriding KOYEB_API_HOST (Python-SDK parity). */
+  host: string;
+  /** Use an explicit sandbox secret instead of generating one (Python-SDK parity). */
+  sandbox_secret: string;
+  /** Boot the sandbox from a snapshot (object, or name/ID string) instead of a plain image. */
+  snapshot?: Snapshot | string;
+  /** Poll interval in seconds for the readiness wait (Python-SDK parity). */
+  poll_interval: number;
+  /** Best-effort delete when readiness fails (default true; Python-SDK parity). */
+  cleanup_on_failure: boolean;
 }>;
 
-export type SandboxExec = TypedEventTarget<{
-  stdout: MessageEvent<{ stream: 'stdout'; data: string }>;
-  stderr: MessageEvent<{ stream: 'stderr'; data: string }>;
-  exit: MessageEvent<{ code: number; error: boolean }>;
-  end: Event;
-}>;
+// Command execution lives in the runner module; re-exported for the public surface.
+export type { ExecOptions, ExecResult, SandboxExec } from './command-runner.js';
+import type { ExecOptions, ExecResult, SandboxExec } from './command-runner.js';
 
 export type SandboxProcess = {
   id: string;
@@ -106,51 +102,38 @@ type ConnectionInfo = {
   secret: string;
 };
 
-/**
- * Deployment-status classification for readiness, failing closed: `HEALTHY` and `DEGRADED` are ready, the
- * pre-ready states are in progress, and every other state (including `SLEEPING`, `STASHED` and unknown values)
- * will not become ready on its own during a wait.
- */
-function classifyDeploymentStatus(status: koyeb.DeploymentStatus): 'ready' | 'in_progress' | 'terminal_failure' {
-  switch (status) {
-    case 'HEALTHY':
-    case 'DEGRADED':
-      return 'ready';
-    case 'PENDING':
-    case 'PROVISIONING':
-    case 'SCHEDULED':
-    case 'ALLOCATING':
-    case 'STARTING':
-      return 'in_progress';
-    default:
-      return 'terminal_failure';
-  }
-}
-
-/** The gateway URL and routing key the platform publishes in the deployment metadata, when present. */
-function metadataConnectionInfo(deployment: koyeb.Deployment): { public_url: string; routing_key: string } | undefined {
-  const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)?.sandbox;
-
-  if (sandbox?.public_url && sandbox?.routing_key) {
-    return { public_url: sandbox.public_url, routing_key: sandbox.routing_key };
-  }
-}
-
 export class Sandbox {
   private readonly api: KoyebApi;
   private _conn_info?: ConnectionInfo;
   private _domain?: string;
+  // Pinned deployment (set on reconnection and network-policy updates) so
+  // readiness polls the replacement, not the still-active old deployment.
   private _deployment_id?: string;
 
   constructor(
     public readonly app_id: string,
     public readonly service_id: string,
     public readonly name: string,
-    private readonly sandbox_secret: string,
+    private readonly sandbox_secret?: string,
     private readonly api_token?: string,
+    private readonly host?: string,
+    /** False for sandboxes in caller-owned apps: delete() must not destroy the app. */
+    private readonly owns_app = true,
+    private readonly poll_interval: number = DEFAULT_POLL_INTERVAL,
   ) {
-    this.api = new KoyebApi(this.api_token);
+    this.api = new KoyebApi(this.api_token, undefined, this.host);
+    // Transport policy rides on this class's authorized fetch, so the seam
+    // tests already mock stays the seam.
+    this.gateway = new ExecutorGateway((path, init, body) => this.fetch(path, init, body));
+    this.runner = new CommandRunner({
+      name: this.name,
+      post: (path, init, body, hooks) => this.request(path, init, body, hooks),
+      raw: (path, init, body) => this.gateway.raw(path, init, body),
+    });
   }
+
+  private readonly gateway: ExecutorGateway;
+  private readonly runner: CommandRunner;
 
   get id(): string {
     return this.service_id;
@@ -164,15 +147,12 @@ export class Sandbox {
     exposed_port_protocol: 'http',
     timeout: DEFAULT_WAIT_TIMEOUT,
     idle_timeout: DEFAULT_IDLE_TIMEOUT,
+    cleanup_on_failure: true,
   } satisfies CreateSandboxOptions;
 
   static async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
     const opts = { ...this.defaultCreateSandboxOptions, ...omitUndefined(options) };
-    const token = opts.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
+    const { token } = resolveClient(opts);
 
     const { definition, sandbox_secret } = buildDefinition({
       name: opts.name,
@@ -187,33 +167,78 @@ export class Sandbox {
       enable_tcp_proxy: opts.enable_tcp_proxy,
       idle_timeout: opts.idle_timeout,
       _experimental_enable_light_sleep: opts._experimental_enable_light_sleep,
+      _experimental_deep_sleep_value: opts._experimental_deep_sleep_value,
       block_network: opts.block_network,
       outbound_allowlist: opts.outbound_allowlist,
+      entrypoint: opts.entrypoint,
+      command: opts.command,
+      args: opts.args,
+      enable_mesh: opts.enable_mesh,
+      sandbox_secret: opts.sandbox_secret,
     });
 
-    const service = await this.createService(token, opts, definition);
-    const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, sandbox_secret, token);
-    sandbox._deployment_id = service.latest_deployment_id;
+    const resolvedSnapshot =
+      opts.snapshot !== undefined
+        ? // Deferred: the snapshot module composes Sandbox, so resolve at call time.
+          await (await import('./snapshot.js')).resolveSnapshot(opts.snapshot, token, opts.host)
+        : undefined;
+    const service = await this.createService(token, opts, definition, resolvedSnapshot);
+    const sandbox = new Sandbox(
+      service.app_id!,
+      service.id!,
+      service.name!,
+      sandbox_secret,
+      token,
+      opts.host,
+      !opts.app_id,
+      opts.poll_interval,
+    );
+
+    // The create reply names the deployment it started: pin it so the
+    // readiness wait never re-fetches the service to find it.
+    if (service.latest_deployment_id) {
+      sandbox.pinDeployment(service.latest_deployment_id);
+    }
 
     if (opts.wait_ready) {
+      // Cleanup never masks the original failure: delete errors are swallowed
+      // and the readiness outcome (error or timeout note) is rethrown.
+      const cleanup = () =>
+        opts.cleanup_on_failure
+          ? sandbox
+              .delete()
+              .then(
+                () => true,
+                () => false, // best-effort teardown; the original failure matters more
+              )
+          : Promise.resolve(false);
+
       let ready: boolean;
       try {
-        ready = await sandbox.wait_ready(opts.timeout);
+        ready = await sandbox.wait_ready(opts.timeout, opts.poll_interval);
       } catch (error) {
-        try {
-          await sandbox.delete();
-        } catch {
-          // best-effort cleanup; suppress delete error to preserve original
+        const deleted = await cleanup();
+
+        if (opts.cleanup_on_failure && error instanceof Error) {
+          error.message += deleted
+            ? ' The sandbox was deleted.'
+            : ' The sandbox could not be deleted and may still exist.';
         }
         throw error;
       }
       if (!ready) {
-        try {
-          await sandbox.delete();
-        } catch {
-          // best-effort cleanup; suppress delete error to preserve original
+        const deleted = await cleanup();
+
+        if (!opts.cleanup_on_failure) {
+          throw new SandboxTimeoutError(sandbox.name, opts.timeout);
         }
-        throw new SandboxTimeoutError(sandbox.name, opts.timeout);
+        throw new SandboxTimeoutError(
+          sandbox.name,
+          opts.timeout,
+          `Sandbox '${sandbox.name}' did not become ready within ${opts.timeout} seconds ${
+            deleted ? 'and was deleted' : 'but could not be deleted and may still exist'
+          }. Create with cleanup_on_failure=False to keep a timed-out sandbox for inspection.`,
+        );
       }
     }
 
@@ -224,175 +249,238 @@ export class Sandbox {
     token: string,
     opts: CreateSandboxOptions,
     definition: koyeb.DeploymentDefinition,
+    snapshot?: { id: string; type: SnapshotType },
   ) {
-    const api = new KoyebApi(token);
+    const api = new KoyebApi(token, undefined, opts.host);
 
-    const app = await api.createApp({
-      name: `sandbox-app-${opts.name}-${Date.now()}`,
-      life_cycle: { delete_when_empty: true },
-    });
+    let app: { id?: string };
+
+    if (opts.app_id) {
+      app = { id: opts.app_id };
+    } else {
+      app = await api.createApp({
+        name: `sandbox-app-${opts.name}-${Date.now()}`,
+        life_cycle: { delete_when_empty: true },
+      });
+    }
 
     try {
       return await api.createService({
         app_id: app.id,
-        definition,
+        // A FULL snapshot carries its own definition; the API infers it.
+        ...(snapshot ? { instance_snapshot_id: snapshot.id } : {}),
+        ...(snapshot?.type === 'FULL' ? {} : { definition }),
         life_cycle: {
           delete_after_create: parseDuration(opts.delete_after_delay),
           delete_after_sleep: parseDuration(opts.delete_after_inactivity_delay),
         },
       });
     } catch (error) {
-      await api.deleteApp(app.id!);
+      // Only clean up apps we created; a caller-supplied app outlives us.
+      // The cleanup must never mask the original create failure.
+      if (!opts.app_id) {
+        await api.deleteApp(app.id!).catch(() => {
+          // best-effort teardown; the create error matters more
+        });
+      }
       throw error;
     }
   }
 
-  static async get_from_id(serviceId: string, apiToken?: string) {
-    const token = apiToken ?? getEnv('KOYEB_API_TOKEN');
+  /**
+   * List every sandbox service as lazy handles (Python parity).
+   *
+   * Handles carry no executor secret: connected operations raise
+   * NoSandboxSecretError — reconnect with `Sandbox.get_from_id(handle.id)`.
+   */
+  static async list(
+    options: { app_id?: string; name?: string; api_token?: string; host?: string } = {},
+  ): Promise<Sandbox[]> {
+    const { token, client: api } = resolveClient(options);
 
-    if (!token) {
-      throw new MissingApiTokenError();
+    const sandboxes: Sandbox[] = [];
+    const limit = 100;
+    let offset = 0;
+
+    // Paginate until offset passes the reported total, mirroring the Python page size.
+    for (;;) {
+      const { services, count } = await api.listServicesPage(
+        omitUndefined({
+          app_id: options.app_id,
+          name: options.name,
+          types: ['SANDBOX' as const],
+          limit: String(limit),
+          offset: String(offset),
+        }),
+      );
+
+      for (const service of services) {
+        sandboxes.push(
+          new Sandbox(service.app_id ?? '', service.id ?? '', service.name ?? '', undefined, token, options.host),
+        );
+      }
+
+      offset += limit;
+
+      if (offset >= count) {
+        return sandboxes;
+      }
+    }
+  }
+
+  /** The pinned deployment id, or the live service's active/latest when unset. */
+  private async resolveDeploymentId(): Promise<string | undefined> {
+    if (isDefined(this._deployment_id)) {
+      return this._deployment_id;
     }
 
-    const api = new KoyebApi(token);
+    const service = await this.api.getService(this.service_id);
+    const deploymentId = service.active_deployment_id ?? service.latest_deployment_id;
+
+    if (deploymentId) {
+      this._deployment_id = deploymentId;
+    }
+
+    return deploymentId;
+  }
+
+  private pinDeployment(deploymentId: string): void {
+    this._deployment_id = deploymentId;
+  }
+
+  /** Seed the executor address from a deployment already in hand. */
+  private seedConnInfoFromDeployment(deployment: koyeb.Deployment): void {
+    if (this._conn_info) {
+      return;
+    }
+
+    const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)?.sandbox;
+
+    if (sandbox?.public_url && sandbox?.routing_key && this.sandbox_secret) {
+      this._conn_info = {
+        public_url: `${sandbox.public_url}/koyeb-sandbox`,
+        routing_key: sandbox.routing_key,
+        secret: this.sandbox_secret,
+      };
+    }
+  }
+
+  /** Drop cached connection state after a redeployment, pinning the new deployment. */
+  private resetConnectionState(deploymentId?: string): void {
+    this._deployment_id = deploymentId;
+    this._conn_info = undefined;
+    this._domain = undefined;
+  }
+
+  static async get_from_id(serviceId: string, apiToken?: string, host?: string) {
+    const { token, client: api } = resolveClient({ api_token: apiToken, host });
     const service = await api.getService(serviceId);
-    const deployment = await api.getDeployment(service.latest_deployment_id!);
+    // Prefer the live deployment over the latest one, matching the Python
+    // SDK: a rolled-back sandbox must resolve to the deployment that is
+    // actually serving.
+    const deploymentId = service.active_deployment_id ?? service.latest_deployment_id;
+    const noSecret = () =>
+      new NoSandboxSecretError(
+        `Sandbox '${serviceId}' has no SANDBOX_SECRET in its deployment definition — it may not be a Koyeb sandbox service, so the executor connection cannot be established.`,
+      );
+
+    if (!deploymentId) {
+      throw noSecret();
+    }
+
+    const deployment = await api.getDeployment(deploymentId);
 
     const secret = deployment.definition?.env?.find(({ key }) => key === 'SANDBOX_SECRET');
 
-    assert(secret?.value, new NoSandboxSecretError());
+    assert(secret?.value, noSecret());
 
-    const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, secret.value, token);
-    sandbox._deployment_id = deployment.id;
-    sandbox.cache_conn_info(deployment);
+    const sandbox = new Sandbox(service.app_id!, service.id!, service.name!, secret.value, token, host);
+    // Reconnected handles poll the deployment they resolved, even if the
+    // service later rolls to another one.
+    sandbox.pinDeployment(deploymentId);
+    // The deployment is in hand with its metadata: seed the executor
+    // address so the first connected call needs no extra lookup.
+    sandbox.seedConnInfoFromDeployment(deployment);
 
     return sandbox;
   }
 
-  /**
-   * Waits for the deployment to be HEALTHY, then for the executor's `/health` to answer. Both are polled with
-   * backoff, from 0.1 s doubling up to `pollInterval` seconds. Probing the gateway before HEALTHY would not
-   * help: the sandbox's address is not published yet, and a lookup that fails can be cached for a few seconds.
-   *
-   * Resolves `true` once ready and `false` on timeout or abort. Throws `SandboxDeploymentError` as soon as the
-   * deployment reaches a status that will not become ready (e.g. `ERROR`, `STOPPED`, `SLEEPING`).
-   */
   async wait_ready(
-    timeout = DEFAULT_WAIT_TIMEOUT,
-    pollInterval = DEFAULT_READY_POLL_INTERVAL,
+    timeout = DEFAULT_INSTANCE_WAIT_TIMEOUT,
+    pollInterval = this.poll_interval,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const start = Date.now();
-    let interval = Math.min(READY_POLL_INITIAL_INTERVAL, pollInterval);
-    let deployment_healthy = false;
-
-    do {
-      // An already-aborted signal never fires wait()'s listener: stop up front.
-      if (signal?.aborted) {
-        return false;
-      }
-
-      if (!deployment_healthy) {
-        deployment_healthy = await this.is_deployment_healthy();
-      }
-
-      if (deployment_healthy && (await this.is_executor_healthy())) {
-        return true;
-      }
-
-      await wait(interval * 1_000, signal);
-      interval = Math.min(interval * 2, pollInterval);
-    } while (Date.now() - start < timeout * 1_000);
-
-    return false;
+    // Python latches deployment health: the phased wait advances from the
+    // deployment phase to the executor phase on first success, then only
+    // polls the executor for the rest of the wait.
+    return waitForPhased(
+      [() => this.deployment_healthy(), () => this.executor_healthy()],
+      timeout,
+      pollInterval,
+      signal,
+      DEFAULT_WAIT_START_INTERVAL,
+    );
   }
 
   async wait_tcp_proxy_ready(
-    timeout = DEFAULT_WAIT_TIMEOUT,
-    pollInterval = DEFAULT_POLL_INTERVAL,
+    timeout = DEFAULT_INSTANCE_WAIT_TIMEOUT,
+    pollInterval = this.poll_interval,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    return waitFor(async () => isDefined(await this.get_tcp_proxy_info()), timeout, pollInterval, signal);
+    return waitFor(
+      async () => isDefined(await this.get_tcp_proxy_info()),
+      timeout,
+      pollInterval,
+      signal,
+      DEFAULT_WAIT_START_INTERVAL,
+    );
   }
 
   async is_healthy(): Promise<boolean> {
-    const conn = await this.get_conn_info();
-    const headers: Record<string, string> = { Authorization: `Bearer ${conn.secret}` };
-
-    if (conn.routing_key) {
-      headers['X-Routing-Key'] = conn.routing_key;
+    // Deployment status first (Python parity): a terminal deployment never
+    // becomes ready, and transient errors just mean "not yet".
+    if (!(await this.deployment_healthy())) {
+      return false;
     }
 
-    const response = await fetch(`${conn.public_url}/health`, { headers });
-
-    return response.ok;
+    return this.executor_healthy();
   }
 
-  private async resolve_deployment_id(): Promise<string | undefined> {
-    if (!this._deployment_id) {
-      const service = await this.api.getService(this.service_id);
-      this._deployment_id = service.active_deployment_id || service.latest_deployment_id;
-    }
-
-    return this._deployment_id;
-  }
-
-  /** Whether the deployment is HEALTHY; API errors count as not yet. Caches the connection info once healthy. */
-  private async is_deployment_healthy(): Promise<boolean> {
-    let deployment: koyeb.Deployment;
-
+  private async deployment_healthy(): Promise<boolean> {
     try {
-      const deploymentId = await this.resolve_deployment_id();
+      const deploymentId = await this.resolveDeploymentId();
 
       if (!deploymentId) {
         return false;
       }
 
-      deployment = await this.api.getDeployment(deploymentId);
-    } catch {
+      const deployment = await this.api.getDeployment(deploymentId);
+
+      if (classifyDeploymentStatus(deployment.status) === 'terminal_failure') {
+        throw new SandboxDeploymentError(this.name, deployment.status ?? ('UNKNOWN' as koyeb.DeploymentStatus));
+      }
+
+      if (classifyDeploymentStatus(deployment.status) === 'ready') {
+        // The healthy deployment publishes the executor address: seed it
+        // so the executor phase needs no extra lookup.
+        this.seedConnInfoFromDeployment(deployment);
+        return true;
+      }
+
       return false;
-    }
-
-    if (isUndefined(deployment.status)) {
-      return false;
-    }
-
-    const classification = classifyDeploymentStatus(deployment.status);
-
-    if (classification === 'terminal_failure') {
-      throw new SandboxDeploymentError(this.name, deployment.status);
-    }
-
-    if (classification === 'ready') {
-      this.cache_conn_info(deployment);
-      return true;
-    }
-
-    return false;
-  }
-
-  /** Whether the executor answers `/health`; a network error counts as not ready. */
-  private async is_executor_healthy(): Promise<boolean> {
-    try {
-      const response = await this.fetch('/health', { method: 'GET' });
-      // Read the body so the connection goes back to the pool for the next request.
-      await response.arrayBuffer();
-      return response.ok;
-    } catch {
+    } catch (error) {
+      // Only the terminal-state signal matters; anything else keeps polling.
+      if (error instanceof SandboxDeploymentError) {
+        throw error;
+      }
       return false;
     }
   }
 
-  private cache_conn_info(deployment: koyeb.Deployment) {
-    const metadata = metadataConnectionInfo(deployment);
-
-    if (!this._conn_info && metadata) {
-      this._conn_info = {
-        public_url: `${metadata.public_url}/koyeb-sandbox`,
-        routing_key: metadata.routing_key,
-        secret: this.sandbox_secret,
-      };
-    }
+  private async executor_healthy(): Promise<boolean> {
+    // Through the transport seam like every other executor call: one header
+    // assembly, and the 5s bound lives in the gateway (Python parity).
+    return this.gateway.health();
   }
 
   async get_tcp_proxy_info(): Promise<[host: string, public_port: number] | undefined> {
@@ -443,11 +531,15 @@ export class Sandbox {
 
   private async get_metadata_connection_info(): Promise<{ public_url: string; routing_key: string } | undefined> {
     try {
-      const service = await this.api.getService(this.service_id);
-      const deploymentId = service.active_deployment_id || service.latest_deployment_id;
+      const deploymentId = await this.resolveDeploymentId();
       if (!deploymentId) return;
 
-      return metadataConnectionInfo(await this.api.getDeployment(deploymentId));
+      const deployment = await this.api.getDeployment(deploymentId);
+      const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)?.sandbox;
+
+      if (sandbox?.public_url && sandbox?.routing_key) {
+        return { public_url: sandbox.public_url, routing_key: sandbox.routing_key };
+      }
     } catch {
       return;
     }
@@ -457,6 +549,15 @@ export class Sandbox {
     if (this._conn_info) {
       return this._conn_info;
     }
+
+    // Lazy handles (from list()) carry no executor secret; fail before any
+    // request instead of calling the executor without credentials.
+    assert(
+      this.sandbox_secret,
+      new NoSandboxSecretError(
+        'Sandbox secret not available — this handle is not executor-connected (e.g. it came from Sandbox.list()); use Sandbox.get_from_id(<id>) for a connected handle',
+      ),
+    );
 
     const metadata = await this.get_metadata_connection_info();
 
@@ -502,8 +603,19 @@ export class Sandbox {
       },
     });
 
-    // The update redeploys: later readiness checks follow the new deployment.
-    this._deployment_id = updated.latest_deployment_id;
+    // The update redeploys: pin the replacement so wait_ready() polls it.
+    // The lifecycle is already applied, so a failed id lookup must not
+    // surface as an update failure.
+    let newDeploymentId: string | undefined;
+
+    try {
+      newDeploymentId =
+        updated?.latest_deployment_id ?? (await this.api.getService(this.service_id)).latest_deployment_id;
+    } catch {
+      // Readiness resolves the id fresh when no pin is set.
+    }
+
+    this.resetConnectionState(newDeploymentId);
   }
 
   /**
@@ -525,19 +637,117 @@ export class Sandbox {
       egress: { mode: 'EGRESS_POLICY_MODE_DEFAULT' },
     };
 
-    const service = await this.api.getService(this.service_id);
-    const deployment = await this.api.getDeployment(service.latest_deployment_id!);
+    try {
+      const service = await this.api.getService(this.service_id);
+      const deployment = await this.api.getDeployment(service.latest_deployment_id!);
 
-    const updated = await this.api.updateService(this.service_id, {
-      definition: { ...deployment.definition, network_policy },
-    });
+      const updated = await this.api.updateService(this.service_id, {
+        definition: { ...deployment.definition, network_policy },
+      });
 
-    // The update redeploys: later readiness checks follow the new deployment.
-    this._deployment_id = updated.latest_deployment_id;
+      // Pin the replacement so wait_ready() polls it, not the still-active old
+      // deployment. The policy is already applied, so a failed id lookup must
+      // not surface as an update failure.
+      let newDeploymentId: string | undefined;
+
+      try {
+        newDeploymentId =
+          updated?.latest_deployment_id ?? (await this.api.getService(this.service_id)).latest_deployment_id;
+      } catch {
+        // Readiness resolves the id fresh when no pin is set.
+      }
+
+      this.resetConnectionState(newDeploymentId);
+    } catch (error) {
+      if (error instanceof SandboxError) {
+        throw error;
+      }
+      throw new SandboxError(`Failed to update network policy: ${String(error)}`);
+    }
   }
 
   async delete(): Promise<void> {
-    await this.api.deleteApp(this.app_id);
+    // A caller-owned app hosts other services: only tear down our own (Python parity).
+    if (this.owns_app) {
+      await this.api.deleteApp(this.app_id);
+    } else {
+      await this.api.deleteService(this.service_id);
+    }
+  }
+
+  /**
+   * Snapshot this sandbox's first running instance. The captured state can
+   * boot new sandboxes without re-provisioning (see `create_from_snapshot`).
+   */
+  async snapshot(name: string, options: SnapshotOptions = {}): Promise<Snapshot> {
+    // Python wraps every failure of this operation in one message.
+    try {
+      return await this.createSnapshot(name, options);
+    } catch (error) {
+      throw new SandboxError(`Failed to create snapshot: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async createSnapshot(name: string, options: SnapshotOptions): Promise<Snapshot> {
+    const instances = await this.api.listInstances({
+      service_id: this.service_id,
+      statuses: ['HEALTHY', 'STARTING', 'ALLOCATING'],
+      limit: '1',
+    });
+    const instance = instances[0];
+    assert(instance?.id, new SandboxError(`No running instances found for service ${this.service_id}`));
+
+    const model = await this.api.createInstanceSnapshot({
+      instance_id: instance.id,
+      name,
+      type: options.snapshot_type === 'FULL' ? 'INSTANCE_SNAPSHOT_TYPE_FULL' : 'INSTANCE_SNAPSHOT_TYPE_FILESYSTEM',
+    });
+    assert(model?.id, new SandboxError('Failed to create snapshot: no snapshot returned from API'));
+
+    const snapshot = (await import('./snapshot.js')).Snapshot.from_model(model, {
+      api_token: this.api_token,
+      host: this.host,
+      sandbox_secret: this.sandbox_secret,
+    });
+
+    if (options.wait_available === false) {
+      return snapshot;
+    }
+
+    const timeout = options.timeout ?? DEFAULT_SNAPSHOT_WAIT_TIMEOUT;
+    const done = await waitFor(
+      async () => {
+        await snapshot.refresh();
+        return snapshot.status === 'AVAILABLE' || snapshot.status === 'ERROR';
+      },
+      timeout,
+      options.poll_interval ?? this.poll_interval,
+    );
+
+    if (!done) {
+      throw new SandboxTimeoutError(name, timeout, `Snapshot did not become available within ${timeout} seconds`);
+    }
+
+    if (snapshot.status === 'ERROR') {
+      throw new SandboxError(`Snapshot creation failed: ${snapshot.messages.join(', ')}`);
+    }
+
+    return snapshot;
+  }
+
+  /** Create a new sandbox booted from a snapshot (object, or name/ID string). */
+  /** Create a new sandbox booted from a snapshot. Options are the full create options (Python's **create_kwargs). */
+  static async create_from_snapshot(
+    snapshot: Snapshot | string,
+    name?: string,
+    options: CreateSandboxOptions = {},
+  ): Promise<Sandbox> {
+    return Sandbox.create({ snapshot, ...(name !== undefined ? { name } : {}), ...options });
+  }
+
+  /** Build a snapshot from a declarative recipe (files, copies, commands). */
+  static template(name: string, image: string, options: TemplateOptions = {}): DeclarativeSnapshot {
+    return new DeclarativeSnapshot(name, image, options);
   }
 
   async fetch(path: string, init: RequestInit, requestBody?: unknown) {
@@ -558,42 +768,20 @@ export class Sandbox {
     return fetch(`${conn.public_url}${path}`, init);
   }
 
-  async request(path: string, init: RequestInit, requestBody?: unknown) {
-    const response = await this.fetch(path, init, requestBody);
-
-    const contentType = response.headers.get('Content-Type');
-    const responseBody = contentType?.startsWith('application/json') ? await response.json() : await response.text();
-
-    if (!response.ok) {
-      throw new SandboxRequestError(response, responseBody);
-    }
-
-    return responseBody;
+  async request(path: string, init: RequestInit, requestBody?: unknown, hooks?: { onAttempt?: () => void }) {
+    return this.gateway.post(path, init, requestBody, hooks);
   }
 
   get filesystem() {
     return new SandboxFilesystem(this);
   }
 
-  async exec(
-    cmd: string,
-    { cwd, env, signal }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal } = {},
-  ): Promise<{ stdout: string; stderr: string; code: number }> {
-    return this.request('/run', { method: 'POST', signal }, { cmd, cwd, env });
+  async exec(cmd: string, options: ExecOptions = {}): Promise<ExecResult> {
+    return this.runner.run(cmd, options);
   }
 
-  exec_stream(
-    cmd: string,
-    { cwd, env, signal }: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal } = {},
-  ): SandboxExec {
-    const emitter = new EventTarget();
-
-    this.fetch('/run_streaming', { method: 'POST', signal }, { cmd, cwd, env })
-      .then((response) => response.body)
-      .then((body) => body && handleServerSentEvents(emitter, body))
-      .catch((error) => emitter.dispatchEvent(new MessageEvent('error', { data: error })));
-
-    return emitter;
+  exec_stream(cmd: string, options: Pick<ExecOptions, 'cwd' | 'env' | 'signal'> = {}): SandboxExec {
+    return this.runner.stream(cmd, options);
   }
 
   async expose_port(port: number): Promise<{ port: number; exposed_at: string }> {
@@ -645,3 +833,4 @@ export class Sandbox {
     return count;
   }
 }
+

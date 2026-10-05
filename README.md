@@ -74,10 +74,16 @@ Creates a new sandbox.
 | `_experimental_enable_light_sleep` | When enabled, uses idle_timeout for light_sleep and sets deep_sleep=3900.                                                           |
 | `block_network`                    | Block all outbound network access. Mutually exclusive with `outbound_allowlist`.                                                    |
 | `outbound_allowlist`               | IPs/CIDRs allowed as outbound destinations; all other traffic is blocked. Bare IPs are normalized to `/32` (IPv4) or `/128` (IPv6). |
+| `poll_interval`                    | Seconds between readiness polls (defaults to `0.5`).                                                                                |
+| `cleanup_on_failure`               | Best-effort delete of the sandbox when readiness fails (default `true`). Pass `false` to keep a failed sandbox for inspection.       |
 
-### `Sandbox.get_from_id(serviceId, apiToken?)`
+### `Sandbox.get_from_id(serviceId, apiToken?, host?)`
 
 Load an existing Sandbox from a Koyeb service ID. Useful for long-lived integrations.
+
+### `Sandbox.list(options?)`
+
+List every sandbox service as lazy handles: `options` accepts `app_id` and `name` filters plus `api_token` and `host` overrides. Handles carry no executor secret — connected operations (commands, filesystem) raise `NoSandboxSecretError`, while health checks keep polling to their timeout; reconnect with `Sandbox.get_from_id(handle.id)`.
 
 ## Claiming Sandboxes from a Pool
 
@@ -92,12 +98,15 @@ Claims a sandbox from a pool and returns a `ClaimResult` with `claim_id`, `pool_
 - **Warm path** (`prewarmed: true`): the claimed sandbox is already running and ready to use.
 - **Cold path** (`prewarmed: false`): a new sandbox service is created on demand. `service_id` is returned immediately; wait for it with [`wait_claim_ready`](#wait_claim_readyclaimorserviceid-options).
 
-The SDK retries transient failures (network errors, `429`, `5xx`) automatically, reusing the same `request_id`, so retries never double-claim.
+The SDK retries HTTP `429` and `5xx` responses automatically, reusing the same `request_id`, so retries never double-claim. Failures without an HTTP status (e.g. network errors) are not retried.
 
-| Option       | Description                                                                                       |
-| ------------ | ------------------------------------------------------------------------------------------------- |
-| `request_id` | Idempotency key of the claim. Generated once (UUID v4) when omitted and preserved across retries. |
-| `api_token`  | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`.                           |
+| Option         | Description                                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------------- |
+| `request_id`   | Idempotency key of the claim. Generated once (UUID v4) when omitted and preserved across retries. |
+| `api_token`    | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`.                           |
+| `host`         | Target API host, overriding `KOYEB_API_HOST`.                                                     |
+| `max_attempts` | Max claim attempts on retryable failures (`429`/`5xx`). Defaults to 3.                            |
+| `retry_delay`  | Base delay in seconds between attempts; the wait is `retry_delay` × attempt. Defaults to 1.       |
 
 ### `get_claim(claimId, options?)`
 
@@ -144,29 +153,31 @@ await sandbox.delete();
 
 ## Managing Service Pools
 
-Service pools keep a set of pre-provisioned sandboxes warm so a claim is fulfilled immediately. The pool's `definition` is a SANDBOX-type `DeploymentDefinition` built from the same curated flags as `Sandbox.create`.
+Service pools keep a set of pre-provisioned sandboxes warm so a claim is fulfilled immediately. The pool's `definition` is a `DeploymentDefinition` built from the same curated flags as `Sandbox.create` — `type` defaults to `SANDBOX`; `WEB` and `WORKER` definitions are accepted (with their own `ports`/`routes`), and `DATABASE` is rejected. SANDBOX pools always carry the executor's auto wiring (ports 3030/3031), keep mesh `AUTO`, and never inject a `SANDBOX_SECRET` — the platform mints one server-side; an explicit `SANDBOX_SECRET` in `env` passes through verbatim.
 
 ### `ServicePool.create(name, options?)`
 
 Creates a new service pool.
 
-| Option                             | Description                                                               |
-| ---------------------------------- | ------------------------------------------------------------------------- |
-| `size`                             | Target number of pre-warmed sandboxes. Defaults to 1.                     |
-| `image`                            | Docker image. Defaults to `koyeb/sandbox`.                                |
-| `instance_type`                    | Instance size. Defaults to `micro`.                                       |
-| `region`                           | Region slug. Defaults to `na`.                                            |
-| `env`                              | Environment variables.                                                    |
-| `config_files`                     | Config files with optional permissions.                                   |
-| `privileged`                       | Run in privileged mode.                                                   |
-| `registry_secret`                  | Registry secret name for private images.                                  |
-| `exposed_port_protocol`            | Protocol for the exposed port (`http` or `http2`).                        |
-| `enable_tcp_proxy`                 | Enable TCP proxying on port 3031.                                         |
-| `idle_timeout`                     | Seconds before members scale to zero. Set 0 to disable.                   |
-| `block_network`                    | Block all outbound network. Mutually exclusive with `outbound_allowlist`. |
-| `outbound_allowlist`               | IPs/CIDRs allowed as outbound; all other traffic blocked.                 |
-| `_experimental_enable_light_sleep` | Enable light sleep with `idle_timeout`.                                   |
-| `api_token`                        | API token, overriding `process.env.KOYEB_API_TOKEN`.                      |
+| Option                             | Description                                                                             |
+| ---------------------------------- | --------------------------------------------------------------------------------------- |
+| `size`                             | Target number of pre-warmed sandboxes. Defaults to 1.                                   |
+| `type`                             | Definition type: `SANDBOX` (default), `WEB`, or `WORKER`. `DATABASE` is rejected.        |
+| `image`                            | Docker image. Defaults to `koyeb/sandbox`.                                              |
+| `instance_type`                    | Instance size. Defaults to `micro`.                                                     |
+| `region`                           | Region slug. Defaults to `na`.                                                          |
+| `env`                              | Environment variables. An explicit `SANDBOX_SECRET` passes through verbatim.            |
+| `config_files`                     | Config files with optional permissions.                                                 |
+| `privileged`                       | Run in privileged mode.                                                                 |
+| `registry_secret`                  | Registry secret name for private images.                                                |
+| `ports` / `routes`                 | Explicit member wiring (non-SANDBOX types only; rejected on SANDBOX pools).              |
+| `exposed_port_protocol`            | Protocol for the exposed port (`http` or `http2`; SANDBOX only).                        |
+| `enable_tcp_proxy`                 | Enable TCP proxying on port 3031 (SANDBOX only).                                       |
+| `idle_timeout`                     | Seconds before members scale to zero. Set 0 to disable.                                 |
+| `block_network`                    | Block all outbound network. Mutually exclusive with `outbound_allowlist`.               |
+| `outbound_allowlist`               | IPs/CIDRs allowed as outbound; all other traffic blocked.                               |
+| `_experimental_enable_light_sleep` | Enable light sleep with `idle_timeout`.                                                 |
+| `api_token` / `host`               | API token and API host overrides.                                                       |
 
 ### `ServicePool.get(poolId, options?)`
 
@@ -176,9 +187,9 @@ Fetch a pool by id. `options`: `api_token`.
 
 List pools, optionally filtered by name. `options`: `name`, `limit`, `offset`, `api_token`.
 
-### `pool.update(options)`
+### `pool.update(options?)`
 
-Update the pool's size and/or definition. At least one must be provided. Returns a refreshed `ServicePool`.
+Update the pool's size and/or definition. The update endpoint is a full replace: the live pool is refetched first, so omitted fields are resent unchanged — `update()` with no options resends the current state. Returns a refreshed `ServicePool`.
 
 ### `pool.delete()`
 
@@ -225,8 +236,10 @@ await pool.delete();
 
 | Method                       | Description                                                                                            |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `exec(cmd, options?)`        | Runs a command and resolves with `{ stdout, stderr, code }`. Supports `cwd`, `env`, and `AbortSignal`. |
-| `exec_stream(cmd, options?)` | Streams command output using Server-Sent Events. Emits `stdout`, `stderr`, and `end`.                  |
+| `exec(cmd, options?)`        | Runs a command and resolves with `{ stdout, stderr, code }`.                                                                           |
+| `exec_stream(cmd, options?)` | Streams command output using Server-Sent Events. Emits `stdout`, `stderr`, `exit`, and `end`.          |
+
+`exec` options: `cwd`, `env`, `timeout` (seconds, default `30`), `on_stdout`/`on_stderr` (streaming callbacks; when set, output is no longer buffered), `stream` (default `true` consumes Server-Sent Events, `false` buffers server-side), `raise_on_error` (default `false`; when `true`, a non-zero exit raises `SandboxCommandError`), and `signal` (`AbortSignal`).
 
 ### Streaming Example
 
@@ -249,6 +262,8 @@ stream.addEventListener('end', () => {
   console.log('Command finished');
 });
 ```
+
+For callback-based streaming without event listeners, `exec` accepts `on_stdout`/`on_stderr` directly.
 
 ## Port Exposure
 
@@ -279,6 +294,8 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 | `write_files(files)`                   | Bulk write helper for multiple files.                 |
 | `read_file(path)`                      | Fetch `{ content, encoding }` for a remote file.      |
 | `rename_file(oldPath, newPath)`        | Rename using an internal `mv` command.                |
+| `move_file(src, dst)`                   | Move a file; maps `NO_SUCH_FILE` to `SandboxFileNotFoundError`. |
+| `delete_file(path)`                     | Delete a single file via the executor endpoint.       |
 | `rm(path, recursive?)`                 | Remove a file or directory (`rm -rf` when recursive). |
 | `exists(path)`                         | Return `true` if the path exists.                     |
 | `is_file(path)`                        | Return `true` if the path is a regular file.          |
@@ -286,20 +303,61 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 | `upload_file(localPath, remotePath)`   | Read a local file and upload it.                      |
 | `download_file(localPath, remotePath)` | Download a sandbox file to disk.                      |
 
+## Snapshots
+
+Snapshots capture a sandbox's filesystem (or full state) so new sandboxes boot pre-configured.
+
+```ts
+// Snapshot a running sandbox
+const snapshot = await sandbox.snapshot('my-snapshot');
+
+// Boot a new sandbox from it
+const clone = await Snapshot.get('my-snapshot').then((s) => s.spawn('clone'));
+
+// Or inline at creation time
+const other = await Sandbox.create({ snapshot: 'my-snapshot', name: 'sbx' });
+```
+
+- `sandbox.snapshot(name, options?)` — snapshot the first running instance; waits for availability by default (`snapshot_type: 'FULL'` captures full state).
+- `Snapshot.get(id)` / `Snapshot.list({ type, status, name, limit, offset })` — fetch snapshots.
+- `snapshot.refresh()` / `snapshot.wait_available(timeout?, pollInterval?)` / `snapshot.delete()`.
+- `snapshot.spawn(name?, options?)` — boot a new sandbox from the snapshot.
+- `Sandbox.create({ snapshot, ... })` — create with `instance_snapshot_id`; a `FULL` snapshot omits the definition (the API infers it).
+
+## Templates
+
+Build a snapshot from a declarative recipe: the SDK runs your files and commands on a throwaway builder sandbox, snapshots the result, and tears the builder down.
+
+```ts
+const snapshot = await Sandbox.template('node-ci', 'node:22-slim', { workdir: '/workspace' })
+  .file('package.json', '{"name":"ci","dependencies":{"axios":"^1.7.0"}}')
+  .copy('./local-dir', '/workspace/dir')
+  .run('npm install', '/workspace')
+  .build();
+
+const sandbox = await snapshot.spawn('runner');
+```
+
 ## Error Types
 
-The SDK exports the following error classes for granular handling:
+The SDK exports the following error classes for granular handling. Every one of them extends `SandboxError`, so a single `catch` covers the whole SDK — including API failures.
 
+- `SandboxError` — base class for every SDK failure
 - `MissingApiTokenError`
 - `InvalidPortError`
 - `SandboxTimeoutError`
 - `SandboxDeploymentError`
 - `NoSandboxSecretError`
-- `SandboxRequestError`
+- `SandboxRequestError` — executor non-OK responses (carries `status_code` + `body`)
+- `SandboxApiError` — non-2xx API responses (carries `status` + `body`)
+- `SandboxServiceError` — executor 5xx responses after the retry budget (extends `SandboxRequestError`)
+- `SandboxCommandError` — a command exited non-zero while `raise_on_error` was opted in (carries the command `result`)
+- `SandboxDeploymentError` — the sandbox deployment reached a terminal error state
 - `EgressPolicyError`
 - `PoolClaimError`
 - `ServiceTerminalStateError`
 - `ServicePoolError`
+- `SandboxFilesystemError` (+ `SandboxFileNotFoundError`, `SandboxFileExistsError`)
 
 ## Contributing
 

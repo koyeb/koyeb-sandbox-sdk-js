@@ -108,8 +108,17 @@ export class ServicePool {
     const { token, client: api } = resolveClient(options);
 
     // Thread options whole so no accepted field is silently dropped;
-    // pool mode sends no SDK-side secret and keeps mesh AUTO.
-    const { definition } = buildDefinition({ ...options, name }, { pool: true });
+    // pool mode sends no SDK-side secret and keeps mesh AUTO. Members
+    // default their image and instance type like the Python reference.
+    const { definition } = buildDefinition(
+      {
+        ...options,
+        image: options.image ?? DEFAULT_POOL_IMAGE,
+        instance_type: options.instance_type ?? DEFAULT_POOL_INSTANCE_TYPE,
+        name,
+      },
+      { pool: true },
+    );
 
     const pool = await api.createServicePool(
       omitUndefined({ name, size: options.size ?? DEFAULT_POOL_SIZE, definition }),

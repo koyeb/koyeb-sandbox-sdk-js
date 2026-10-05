@@ -38,7 +38,8 @@ async function main() {
     console.log(`✓ Listed ${pools.length} pool(s)`);
     check(pools.some((p) => p.id === pool.id), 'created pool missing from list');
 
-    // Update the pool's target size.
+    // Update the pool's target size. The endpoint is a full replace, so the
+    // SDK refetches and resends the live definition alongside the new size.
     await pool.update({ size: 5 });
     console.log('✓ Updated: size=5');
 
@@ -46,6 +47,7 @@ async function main() {
     await pool.refresh();
     console.log(`✓ Refreshed, ready_count=${pool.ready_count}, status=${pool.status}`);
     check(pool.size === 5, `expected size 5 after update, got ${String(pool.size)}`);
+    check(pool.definition !== undefined, 'update dropped the pool definition');
   } finally {
     // Deleting fences the pool until outstanding claims drain.
     await pool.delete().catch(() => {});

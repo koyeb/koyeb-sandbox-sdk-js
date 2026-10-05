@@ -69,8 +69,14 @@ async function main() {
       console.log('\n✓ Deleted the claimed sandbox service');
     }
   } finally {
-    await pool.delete();
-    console.log('✓ Deleted the pool');
+    // Deleting fences the pool until outstanding claims drain; best-effort
+    // cleanup never fails a successful run.
+    try {
+      await pool.delete();
+      console.log('✓ Deleted the pool');
+    } catch (error) {
+      console.error(`⚠ Could not delete pool ${pool.id}: ${error}`);
+    }
   }
 }
 

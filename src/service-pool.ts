@@ -30,8 +30,9 @@ export type CreatePoolOptions = Omit<DefinitionOptions, 'enable_mesh' | 'sandbox
   }>;
 
 /**
- * Options for updating a service pool. At least one of `size` or `definition`
- * must be provided.
+ * Options for updating a service pool. The update endpoint is a full
+ * replace: the live pool is refetched first, so omitted fields are resent
+ * as-is rather than dropped.
  */
 export type UpdatePoolOptions = Partial<{
   /** New target pool size. */
@@ -133,15 +134,18 @@ export class ServicePool {
     return pools.map((p) => ServicePool._from_model(p, token));
   }
 
-  async update(options: UpdatePoolOptions): Promise<ServicePool> {
-    if (options.size === undefined && options.definition === undefined) {
-      throw new ServicePoolError('At least one of size or definition must be provided');
-    }
+  /**
+   * Update the pool and return the refreshed handle. The endpoint is a full
+   * replace: the live pool is refetched first so omitted fields are resent,
+   * never dropped — `update()` with no arguments resends the current state.
+   */
+  async update(options: UpdatePoolOptions = {}): Promise<ServicePool> {
+    const current = await this.api.getServicePool(this.id);
 
-    const pool = await this.api.updateServicePool(
-      this.id,
-      omitUndefined({ size: options.size, definition: options.definition }),
-    );
+    const pool = await this.api.updateServicePool(this.id, {
+      size: options.size ?? current.size,
+      definition: options.definition ?? current.definition,
+    });
 
     return ServicePool._from_model(pool, this.api_token);
   }

@@ -43,8 +43,10 @@ export type PoolCall = { url: string; method: string; body?: any };
 /**
  * Pool-flavored fake fetch at the Koyeb API boundary: records every request
  * and answers create/get/update/delete with a minimal service pool reply.
+ * Pass per-call pool payloads to script multi-request sequences (e.g.
+ * refetch-then-update); the last payload repeats for any extra calls.
  */
-export function poolFetch() {
+export function poolFetch(pools: Record<string, unknown>[] = [{ id: 'pool-1', name: 'my-pool' }]) {
   const calls: PoolCall[] = [];
   const fetch = vi.fn(async (request: Request) => {
     const text = await request.clone().text();
@@ -54,7 +56,8 @@ export function poolFetch() {
       body: text ? JSON.parse(text) : undefined,
     });
 
-    return new Response(JSON.stringify({ service_pool: { id: 'pool-1', name: 'my-pool' } }), {
+    const pool = pools[Math.min(calls.length - 1, pools.length - 1)];
+    return new Response(JSON.stringify({ service_pool: pool }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });

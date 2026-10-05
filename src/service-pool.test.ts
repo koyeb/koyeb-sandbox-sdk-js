@@ -166,3 +166,51 @@ describe('ServicePool.create', () => {
     }
   });
 });
+
+describe('ServicePool.update', () => {
+  const liveDefinition = { name: 'my-pool', docker: { image: 'koyeb/sandbox:slim' } };
+
+  it('resends the live definition on a size update: the endpoint is a full replace', async () => {
+    const { fetch, calls } = poolFetch([
+      { id: 'pool-1', name: 'my-pool', size: 2, definition: liveDefinition },
+      { id: 'pool-1', name: 'my-pool', size: 5, definition: liveDefinition },
+    ]);
+    vi.stubGlobal('fetch', fetch);
+
+    const pool = new ServicePool('pool-1', 'my-pool', 2, 1, undefined, liveDefinition);
+    const updated = await pool.update({ size: 5 });
+
+    // The live pool is refetched before the PUT so the resend carries it.
+    expect(calls[0].method).toBe('GET');
+    expect(calls[0].url).toContain('pool-1');
+    expect(calls[1].method).toBe('PUT');
+    expect(calls[1].body).toEqual({ size: 5, definition: liveDefinition });
+    expect(updated.size).toBe(5);
+  });
+
+  it('resends the current state when update is called with no options', async () => {
+    const { fetch, calls } = poolFetch([
+      { id: 'pool-1', name: 'my-pool', size: 2, definition: liveDefinition },
+      { id: 'pool-1', name: 'my-pool', size: 2, definition: liveDefinition },
+    ]);
+    vi.stubGlobal('fetch', fetch);
+
+    const pool = new ServicePool('pool-1', 'my-pool', 2, 1, undefined, liveDefinition);
+    await pool.update();
+
+    expect(calls[1].body).toEqual({ size: 2, definition: liveDefinition });
+  });
+
+  it('lets an explicit definition override the live one', async () => {
+    const { fetch, calls } = poolFetch([
+      { id: 'pool-1', name: 'my-pool', size: 2, definition: liveDefinition },
+    ]);
+    vi.stubGlobal('fetch', fetch);
+
+    const nextDefinition = { name: 'my-pool', docker: { image: 'koyeb/sandbox:latest' } };
+    const pool = new ServicePool('pool-1', 'my-pool', 2, 1, undefined, liveDefinition);
+    await pool.update({ definition: nextDefinition });
+
+    expect(calls[1].body).toEqual({ size: 2, definition: nextDefinition });
+  });
+});

@@ -187,9 +187,9 @@ Fetch a pool by id. `options`: `api_token`.
 
 List pools, optionally filtered by name. `options`: `name`, `limit`, `offset`, `api_token`.
 
-### `pool.update(options)`
+### `pool.update(options?)`
 
-Update the pool's size and/or definition. At least one must be provided. Returns a refreshed `ServicePool`.
+Update the pool's size and/or definition. The update endpoint is a full replace: the live pool is refetched first, so omitted fields are resent unchanged — `update()` with no options resends the current state. Returns a refreshed `ServicePool`.
 
 ### `pool.delete()`
 

@@ -27,8 +27,14 @@ async function main() {
   const poolName = `my-pool-${randomUUID().slice(0, 8)}`;
 
   // Create a pool of 3 warm sandboxes. Definition options mirror
-  // Sandbox.create (image, instance_type, env, region, ...).
-  const pool = await ServicePool.create(poolName, { size: 3, api_token: apiToken });
+  // Sandbox.create (image, instance_type, env, region, ...): the API requires
+  // an image and rejects a definition whose instance type is empty.
+  const pool = await ServicePool.create(poolName, {
+    size: 3,
+    image: 'koyeb/sandbox:slim',
+    instance_type: 'micro',
+    api_token: apiToken,
+  });
   console.log(`✓ Created ${pool}`);
   check(Boolean(pool.id), 'pool creation returned no id');
 

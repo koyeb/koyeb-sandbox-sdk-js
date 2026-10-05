@@ -26,8 +26,13 @@ async function main() {
   // server-side unique (name, workspace) index.
   const poolName = `example-pool-${randomUUID().slice(0, 8)}`;
 
-  // Spawn a pool, claim from it, run code, and clean up both.
-  const pool = await ServicePool.create(poolName, { size: 1, image: 'koyeb/sandbox:slim' });
+  // Spawn a pool, claim from it, run code, and clean up both. The API rejects
+  // a pool definition whose instance type is empty, so name one explicitly.
+  const pool = await ServicePool.create(poolName, {
+    size: 1,
+    image: 'koyeb/sandbox:slim',
+    instance_type: 'micro',
+  });
   console.log(`✓ Created pool ${pool.id} (size ${pool.size})`);
   check(Boolean(pool.id), 'pool creation returned no id');
 

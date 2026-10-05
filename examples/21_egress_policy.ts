@@ -21,6 +21,10 @@ const PROBE = probe('https://example.com');
 // The allowlist probe must hit an allowed destination; example.com is not in it.
 const PROBE_ALLOWED = probe('https://1.1.1.1');
 
+// Network policies are enforced on Kubernetes-backed regions only; Nomad regions
+// (e.g. fra) reject them, so pin the region instead of inheriting KOYEB_REGION.
+const REGION = 'nl-north-1';
+
 let sandbox: Sandbox | undefined;
 
 /**
@@ -81,6 +85,7 @@ async function main() {
   sandbox = await Sandbox.create({
     image: 'koyeb/sandbox',
     name: `egress-${suffix}`,
+    region: REGION,
     wait_ready: true,
     api_token: apiToken,
     block_network: true,

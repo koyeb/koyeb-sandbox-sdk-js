@@ -83,10 +83,13 @@ async function runBenchmark(kind: 'FILESYSTEM' | 'FULL', sizesMb: number[]) {
     let snapshot: Snapshot | undefined;
 
     try {
+      // Instance snapshots are only supported on k8s-backed regions; Nomad
+      // regions (e.g. fra) reject the create.
       builder = await Sandbox.create({
         name: `bench-${kind.toLowerCase()}-${sizeMb}mb-${suffix}`,
         image: 'koyeb/sandbox',
         instance_type: 'xlarge',
+        region: 'nl-north-1',
         wait_ready: true,
         timeout: 600,
         api_token: apiToken,

@@ -38,9 +38,12 @@ async function waitForDocker(sbx: Sandbox, timeout = DOCKERD_TIMEOUT, interval =
 async function main() {
   console.log('Creating privileged sandbox (image koyeb/sandbox:dind, instance_type=medium)...');
   const createStart = Date.now();
+  // The docker build inside this example snapshots the sandbox: instance
+  // snapshots are only supported on k8s-backed regions (fra rejects them).
   const sandbox = await Sandbox.create({
     image: 'koyeb/sandbox:dind',
     name: `docker-in-docker-${suffix}`,
+    region: 'nl-north-1',
     wait_ready: true,
     instance_type: 'medium',
     privileged: true,

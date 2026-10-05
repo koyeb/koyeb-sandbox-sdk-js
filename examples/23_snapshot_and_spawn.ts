@@ -18,9 +18,12 @@ async function main() {
 
   try {
     console.log('✓ Creating sandbox...');
+    // Instance snapshots are only supported on k8s-backed regions; Nomad
+    // regions (e.g. fra) reject the create.
     sbx = await Sandbox.create({
       image: 'node:22-slim',
       name: `snapshot-and-spawn-${suffix}`,
+      region: 'nl-north-1',
       wait_ready: true,
       api_token: apiToken,
     });

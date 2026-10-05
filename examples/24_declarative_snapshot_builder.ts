@@ -59,8 +59,11 @@ async function main() {
 }
 
 function buildSnapshot() {
+  // Instance snapshots are only supported on k8s-backed regions; Nomad
+  // regions (e.g. fra) reject the create.
   return Sandbox.template(`ci-environment-${suffix}`, 'node:22-slim', {
     workdir: '/workspace',
+    region: 'nl-north-1',
     api_token: apiToken,
   })
     .file('package.json', '{"name":"ci","dependencies":{"axios":"^1.7.0"}}')

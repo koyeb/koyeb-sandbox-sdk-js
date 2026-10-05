@@ -11,6 +11,7 @@ export type TemplateOptions = Partial<{
   workdir: string;
   api_token: string;
   host: string;
+  region: string;
   delete_builder: boolean;
 }>;
 
@@ -60,6 +61,7 @@ export class DeclarativeSnapshot {
       name: `builder-${this.name}`,
       api_token: this.resolvedToken,
       ...(this.options.host !== undefined ? { host: this.options.host } : {}),
+      ...(this.options.region !== undefined ? { region: this.options.region } : {}),
     });
 
     try {

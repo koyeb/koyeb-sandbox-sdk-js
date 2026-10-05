@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
 import { koyeb, KoyebApi } from './api.js';
-import { DEFAULT_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT } from './constants.js';
-import { MissingApiTokenError, PoolClaimError, ServiceTerminalStateError } from './errors.js';
-import { assert, getEnv, omitUndefined, waitFor } from './utils.js';
+import { DEFAULT_CLAIM_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT } from './constants.js';
+import { resolveClient } from './credentials.js';
+import { PoolClaimError, ServiceTerminalStateError } from './errors.js';
+import { assert, omitUndefined } from './prelude.js';
+import { classifyServiceStatus } from './readiness.js';
+import { waitFor } from './time.js';
 
 /**
  * Options for claiming a sandbox from a pool.
@@ -11,12 +14,20 @@ import { assert, getEnv, omitUndefined, waitFor } from './utils.js';
 export type ClaimOptions = Partial<{
   /**
    * Idempotency key of the claim. Generated once (UUID v4) when omitted and
-   * preserved across the SDK's internal retries: replaying a claim with the
-   * same `(pool_id, request_id)` pair always returns the same claim.
+   * preserved across the SDK's internal retries — 429/5xx only, up to
+   * `max_attempts`, with a `retry_delay` × attempt backoff: replaying a
+   * claim with the same `(pool_id, request_id)` pair always returns the
+   * same claim.
    */
   request_id: string;
   /** API token for authentication, overriding `process.env.KOYEB_API_TOKEN`. */
   api_token: string;
+  /** Target API host, overriding `KOYEB_API_HOST`. */
+  host: string;
+  /** Max claim attempts on retryable failures (429/5xx). Defaults to 3. */
+  max_attempts: number;
+  /** Base delay in seconds between retry attempts; the wait is retry_delay × attempt. Defaults to 1. */
+  retry_delay: number;
 }>;
 
 /**
@@ -78,17 +89,14 @@ export type WaitClaimReadyOptions = Partial<{
  * returns the same claim without consuming another pool member.
  */
 export async function claim(poolId: string, options: ClaimOptions = {}): Promise<ClaimResult> {
-  const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-  if (!token) {
-    throw new MissingApiTokenError();
-  }
-
-  const api = new KoyebApi(token);
+  const { client: api } = resolveClient(options);
 
   const request_id = options.request_id ?? randomUUID();
 
-  const reply = await api.claim({ pool_id: poolId, request_id });
+  const reply = await api.claim(
+    { pool_id: poolId, request_id },
+    { maxAttempts: options.max_attempts, retryDelaySeconds: options.retry_delay },
+  );
 
   assert(reply.claim_id, new PoolClaimError('The pool claim reply did not include a claim_id'));
   assert(reply.service_id, new PoolClaimError('The pool claim reply did not include a service_id'));
@@ -107,13 +115,7 @@ export async function claim(poolId: string, options: ClaimOptions = {}): Promise
  * `FAILED` or `RELEASED`).
  */
 export async function get_claim(claimId: string, options: GetClaimOptions = {}): Promise<koyeb.PoolClaim> {
-  const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-  if (!token) {
-    throw new MissingApiTokenError();
-  }
-
-  const api = new KoyebApi(token);
+  const { client: api } = resolveClient(options);
 
   return api.getClaim(claimId);
 }
@@ -122,36 +124,12 @@ export async function get_claim(claimId: string, options: GetClaimOptions = {}):
  * List claims on a service pool, optionally filtered by status.
  */
 export async function list_claims(poolId: string, options: ListClaimsOptions = {}): Promise<koyeb.PoolClaim[]> {
-  const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-  if (!token) {
-    throw new MissingApiTokenError();
-  }
-
-  const api = new KoyebApi(token);
+  const { client: api } = resolveClient(options);
 
   return api.listClaims(
     poolId,
     omitUndefined({ status: options.status, limit: options.limit, offset: options.offset }),
   );
-}
-
-/**
- * Service-status classification: `HEALTHY` and `DEGRADED` are usable,
- * `STARTING` and `RESUMING` are still in progress, and every other state —
- * including unknown forward-compat values — is a terminal failure (fail
- * closed). Not cold-path-specific: this is general service health.
- */
-function classifyServiceStatus(status: koyeb.ServiceStatus): 'ready' | 'in_progress' | 'terminal_failure' {
-  if (status === 'HEALTHY' || status === 'DEGRADED') {
-    return 'ready';
-  }
-
-  if (status === 'STARTING' || status === 'RESUMING') {
-    return 'in_progress';
-  }
-
-  return 'terminal_failure';
 }
 
 /**
@@ -167,13 +145,7 @@ export async function wait_claim_ready(
 ): Promise<boolean> {
   const service_id = typeof claimOrServiceId === 'string' ? claimOrServiceId : claimOrServiceId.service_id;
 
-  const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-  if (!token) {
-    throw new MissingApiTokenError();
-  }
-
-  const api = new KoyebApi(token);
+  const { client: api } = resolveClient(options);
 
   return waitFor(
     async () => {
@@ -202,7 +174,7 @@ export async function wait_claim_ready(
       return classification === 'ready';
     },
     options.timeout ?? DEFAULT_WAIT_TIMEOUT,
-    options.poll_interval ?? DEFAULT_POLL_INTERVAL,
+    options.poll_interval ?? DEFAULT_CLAIM_POLL_INTERVAL,
     options.signal,
   );
 }

@@ -5,29 +5,34 @@ import {
   DEFAULT_POOL_INSTANCE_TYPE,
   DEFAULT_POOL_SIZE,
 } from './constants.js';
-import { MissingApiTokenError, ServicePoolError } from './errors.js';
+import { resolveClient } from './credentials.js';
+import { ServicePoolError } from './errors.js';
 import type { ConfigFile, EnvValue } from './sandbox.js';
 import type { ListClaimsOptions } from './claim.js';
-import { assert, buildDefinition, getEnv, omitUndefined } from './utils.js';
-import type { DefinitionOptions } from './utils.js';
+import { assert, omitUndefined } from './prelude.js';
+import { buildDefinition, type DefinitionOptions } from './definition.js';
 
 /**
  * Options for creating a service pool. Shares definition fields with
- * `Sandbox.create` via `DefinitionOptions`; adds pool-specific `size` and
- * `type`. Defaults to `type: SANDBOX` but other service types (WEB, WORKER,
- * DATABASE) are accepted.
+ * `Sandbox.create` via `DefinitionOptions`, minus the sandbox-only `enable_mesh`
+ * (mesh stays AUTO on pools) and `sandbox_secret` (the platform mints pool
+ * secrets). Defaults to `type: SANDBOX`; WEB and WORKER are accepted.
  */
-export type CreatePoolOptions = DefinitionOptions &
+/** No `enable_mesh` (mesh stays AUTO) and no `sandbox_secret` (the platform mints pool secrets). */
+export type CreatePoolOptions = Omit<DefinitionOptions, 'enable_mesh' | 'sandbox_secret'> &
   Partial<{
     /** Target number of pre-warmed members to maintain. Defaults to 1. */
     size: number;
     /** API token, overriding `process.env.KOYEB_API_TOKEN`. */
     api_token: string;
+    /** Target API host, overriding `KOYEB_API_HOST`. */
+    host: string;
   }>;
 
 /**
- * Options for updating a service pool. At least one of `size` or `definition`
- * must be provided.
+ * Options for updating a service pool. The update endpoint is a full
+ * replace: the live pool is refetched first, so omitted fields are resent
+ * as-is rather than dropped.
  */
 export type UpdatePoolOptions = Partial<{
   /** New target pool size. */
@@ -73,31 +78,39 @@ export class ServicePool {
   }
 
   static async create(name: string, options: CreatePoolOptions = {}): Promise<ServicePool> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
+    // Databases are out of scope for pools (product rule); every other
+    // service type is poolable. Fail before any API call.
+    if (options.type === 'DATABASE') {
+      throw new ServicePoolError(
+        'DATABASE pools are not supported: pools accept SANDBOX (default), WEB, and WORKER definitions',
+      );
     }
 
-    const { definition } = buildDefinition({
-      name,
-      type: options.type,
-      image: options.image,
-      instance_type: options.instance_type,
-      region: options.region,
-      env: options.env,
-      config_files: options.config_files,
-      privileged: options.privileged,
-      registry_secret: options.registry_secret,
-      exposed_port_protocol: options.exposed_port_protocol,
-      enable_tcp_proxy: options.enable_tcp_proxy,
-      idle_timeout: options.idle_timeout,
-      _experimental_enable_light_sleep: options._experimental_enable_light_sleep,
-      block_network: options.block_network,
-      outbound_allowlist: options.outbound_allowlist,
-    });
+    // Fail-fast wiring validation (cross-client rule): sandbox pools own
+    // ports 3030/3031, and sandbox-only flags never apply to other types.
+    const type = options.type ?? 'SANDBOX';
 
-    const api = new KoyebApi(token);
+    if (type === 'SANDBOX' && (options.ports !== undefined || options.routes !== undefined)) {
+      throw new ServicePoolError(
+        'explicit ports/routes are not allowed on SANDBOX pools: the sandbox wiring owns ports 3030/3031',
+      );
+    }
+
+    if (
+      type !== 'SANDBOX' &&
+      (options.exposed_port_protocol !== undefined || options.enable_tcp_proxy !== undefined)
+    ) {
+      throw new ServicePoolError(
+        'exposed_port_protocol and enable_tcp_proxy are sandbox-only options and are not allowed on WEB/WORKER pools',
+      );
+    }
+
+    const { token, client: api } = resolveClient(options);
+
+    // Thread options whole so no accepted field is silently dropped;
+    // pool mode sends no SDK-side secret and keeps mesh AUTO.
+    const { definition } = buildDefinition({ ...options, name }, { pool: true });
+
     const pool = await api.createServicePool(
       omitUndefined({ name, size: options.size ?? DEFAULT_POOL_SIZE, definition }),
     );
@@ -106,26 +119,14 @@ export class ServicePool {
   }
 
   static async get(poolId: string, options: { api_token?: string } = {}): Promise<ServicePool> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
-
-    const api = new KoyebApi(token);
+    const { token, client: api } = resolveClient(options);
     const pool = await api.getServicePool(poolId);
 
     return ServicePool._from_model(pool, token);
   }
 
   static async list(options: ListPoolsOptions = {}): Promise<ServicePool[]> {
-    const token = options.api_token ?? getEnv('KOYEB_API_TOKEN');
-
-    if (!token) {
-      throw new MissingApiTokenError();
-    }
-
-    const api = new KoyebApi(token);
+    const { token, client: api } = resolveClient(options);
     const pools = await api.listServicePools(
       omitUndefined({ name: options.name, limit: options.limit, offset: options.offset }),
     );
@@ -133,15 +134,18 @@ export class ServicePool {
     return pools.map((p) => ServicePool._from_model(p, token));
   }
 
-  async update(options: UpdatePoolOptions): Promise<ServicePool> {
-    if (options.size === undefined && options.definition === undefined) {
-      throw new ServicePoolError('At least one of size or definition must be provided');
-    }
+  /**
+   * Update the pool and return the refreshed handle. The endpoint is a full
+   * replace: the live pool is refetched first so omitted fields are resent,
+   * never dropped — `update()` with no arguments resends the current state.
+   */
+  async update(options: UpdatePoolOptions = {}): Promise<ServicePool> {
+    const current = await this.api.getServicePool(this.id);
 
-    const pool = await this.api.updateServicePool(
-      this.id,
-      omitUndefined({ size: options.size, definition: options.definition }),
-    );
+    const pool = await this.api.updateServicePool(this.id, {
+      size: options.size ?? current.size,
+      definition: options.definition ?? current.definition,
+    });
 
     return ServicePool._from_model(pool, this.api_token);
   }

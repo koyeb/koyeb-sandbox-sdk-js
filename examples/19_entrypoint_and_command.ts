@@ -18,6 +18,8 @@ async function main() {
   console.log('=== Example 1: custom command ===');
   let sandbox: Sandbox | undefined;
   try {
+    // The plain image is pulled on first use in a region; a cold pull
+    // outlives the default 60s create budget.
     sandbox = await Sandbox.create({
       image: 'ubuntu',
       name: `custom-command-${suffix}`,
@@ -25,6 +27,7 @@ async function main() {
       args: ['-c', 'touch /tmp/command-was-here && sleep infinity'],
       api_token: apiToken,
       env: { LOG_LEVEL: 'DEBUG' },
+      timeout: 300,
     });
 
     const result = await sandbox.exec("cat /tmp/command-was-here && echo 'File exists'");
@@ -34,14 +37,16 @@ async function main() {
     }
     console.log('  OK: custom command created the file');
   } finally {
-    await sandbox?.delete();
+    // Best-effort: create's own failure cleanup may have already torn down.
+    await sandbox?.delete().catch(() => {});
   }
 
   // Example 2: custom entrypoint with command — the entrypoint runs node,
   // proving the override was used.
   console.log('\n=== Example 2: custom entrypoint ===');
-  sandbox = undefined;
   try {
+    // The plain image is pulled on first use in a region; a cold pull
+    // outlives the default 60s create budget.
     sandbox = await Sandbox.create({
       image: 'node:22-slim',
       name: `custom-entrypoint-${suffix}`,
@@ -49,6 +54,7 @@ async function main() {
       command:
         "require('fs').mkdirSync('/tmp', { recursive: true }); require('fs').writeFileSync('/tmp/started-by-node', 'yes'); setInterval(() => {}, 1_000_000)",
       api_token: apiToken,
+      timeout: 300,
     });
 
     const result = await sandbox.exec('cat /tmp/started-by-node');
@@ -59,7 +65,8 @@ async function main() {
     }
     console.log('  OK: node entrypoint created the marker file');
   } finally {
-    await sandbox?.delete();
+    // Best-effort: create's own failure cleanup may have already torn down.
+    await sandbox?.delete().catch(() => {});
   }
 }
 

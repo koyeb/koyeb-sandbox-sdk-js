@@ -40,13 +40,14 @@ async function main() {
   // Example 2: custom entrypoint with command — the entrypoint runs node,
   // proving the override was used.
   console.log('\n=== Example 2: custom entrypoint ===');
+  sandbox = undefined;
   try {
     sandbox = await Sandbox.create({
       image: 'node:22-slim',
       name: `custom-entrypoint-${suffix}`,
       entrypoint: ['node', '-e'],
       command:
-        "require('fs').mkdirSync('/tmp'); require('fs').writeFileSync('/tmp/started-by-node', 'yes'); setInterval(() => {}, 1_000_000)",
+        "require('fs').mkdirSync('/tmp', { recursive: true }); require('fs').writeFileSync('/tmp/started-by-node', 'yes'); setInterval(() => {}, 1_000_000)",
       api_token: apiToken,
     });
 

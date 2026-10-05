@@ -29,7 +29,7 @@ async function main() {
   // Create a pool of 3 warm sandboxes. Definition options mirror
   // Sandbox.create (image, instance_type, env, region, ...).
   const pool = await ServicePool.create(poolName, { size: 3, api_token: apiToken });
-  console.log(`✓ Created ${pool}`);
+  console.log(`✓ Created pool ${pool.id}`);
   check(Boolean(pool.id), 'pool creation returned no id');
 
   try {
@@ -40,14 +40,14 @@ async function main() {
 
     // Update the pool's target size. The endpoint is a full replace, so the
     // SDK refetches and resends the live definition alongside the new size.
-    await pool.update({ size: 5 });
-    console.log('✓ Updated: size=5');
+    const updated = await pool.update({ size: 5 });
+    check(updated.size === 5, `update reply carried size 5, got ${String(updated.size)}`);
 
-    // Refresh re-fetches the pool (status, ready_count, ...).
-    await pool.refresh();
-    console.log(`✓ Refreshed, ready_count=${pool.ready_count}, status=${pool.status}`);
-    check(pool.size === 5, `expected size 5 after update, got ${String(pool.size)}`);
-    check(pool.definition !== undefined, 'update dropped the pool definition');
+    // Refresh returns a new handle: assert on it, not on the stale one.
+    const refreshed = await pool.refresh();
+    console.log(`✓ Refreshed, ready_count=${refreshed.ready_count}, status=${refreshed.status}`);
+    check(refreshed.size === 5, `expected size 5 after update, got ${String(refreshed.size)}`);
+    check(refreshed.definition !== undefined, 'update dropped the pool definition');
   } finally {
     // Deleting fences the pool until outstanding claims drain.
     await pool.delete().catch(() => {});

@@ -35,7 +35,7 @@ async function main() {
     instance_type: 'micro',
     api_token: apiToken,
   });
-  console.log(`✓ Created ${pool}`);
+  console.log(`✓ Created pool ${pool.id} (size ${pool.size})`);
   check(Boolean(pool.id), 'pool creation returned no id');
 
   try {
@@ -45,15 +45,24 @@ async function main() {
     check(pools.some((p) => p.id === pool.id), 'created pool missing from list');
 
     // Update the pool's target size. The endpoint is a full replace, so the
-    // SDK refetches and resends the live definition alongside the new size.
-    await pool.update({ size: 5 });
+    // SDK refetches and resends the live definition alongside the new size;
+    // the reply already reflects the new state.
+    const updated = await pool.update({ size: 5 });
     console.log('✓ Updated: size=5');
+    check(updated.size === 5, `update reply did not carry size 5, got ${String(updated.size)}`);
 
-    // Refresh re-fetches the pool (status, ready_count, ...).
-    await pool.refresh();
-    console.log(`✓ Refreshed, ready_count=${pool.ready_count}, status=${pool.status}`);
-    check(pool.size === 5, `expected size 5 after update, got ${String(pool.size)}`);
-    check(pool.definition !== undefined, 'update dropped the pool definition');
+    // Refresh re-fetches the pool (status, ready_count, ...). The handle is
+    // immutable, so keep the return value; a GET served right after the
+    // update can briefly return the previous row, so poll until it converges.
+    let refreshed = await pool.refresh();
+    const deadline = Date.now() + 30_000;
+    while (refreshed.size !== 5 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      refreshed = await pool.refresh();
+    }
+    console.log(`✓ Refreshed, ready_count=${refreshed.ready_count}, status=${refreshed.status}`);
+    check(refreshed.size === 5, `expected size 5 after update, got ${String(refreshed.size)}`);
+    check(refreshed.definition !== undefined, 'update dropped the pool definition');
   } finally {
     // Deleting fences the pool until outstanding claims drain.
     await pool.delete().catch(() => {});

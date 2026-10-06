@@ -143,6 +143,32 @@ describe('ServicePool.create', () => {
     expect(secrets).toEqual([{ key: 'SANDBOX_SECRET', value: 'explicit-secret' }]);
   });
 
+  it('defaults the member image and instance type like the Python reference', async () => {
+    const { fetch, calls } = poolFetch();
+    vi.stubGlobal('fetch', fetch);
+
+    await ServicePool.create('my-pool', { api_token: 't' });
+
+    const definition = calls[0].body.definition;
+    expect(definition.docker.image).toBe('koyeb/sandbox');
+    expect(definition.instance_types).toEqual([{ type: 'micro' }]);
+  });
+
+  it('passes explicit image and instance type through verbatim', async () => {
+    const { fetch, calls } = poolFetch();
+    vi.stubGlobal('fetch', fetch);
+
+    await ServicePool.create('my-pool', {
+      api_token: 't',
+      image: 'koyeb/sandbox:slim',
+      instance_type: 'small',
+    });
+
+    const definition = calls[0].body.definition;
+    expect(definition.docker.image).toBe('koyeb/sandbox:slim');
+    expect(definition.instance_types).toEqual([{ type: 'small' }]);
+  });
+
   it('keeps the SANDBOX auto ports, routes, and AUTO mesh on SANDBOX pools', async () => {
     const { fetch, calls } = poolFetch();
     vi.stubGlobal('fetch', fetch);

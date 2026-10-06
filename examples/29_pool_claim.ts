@@ -45,10 +45,6 @@ async function main() {
     console.log(`  Claim status: ${info.status}`);
     check(Boolean(info.status), 'claim get returned no status');
 
-    // Resolve the claimed service to a Sandbox up front, so the finally
-    // block can clean it up even if the cold-path wait fails.
-    const sandbox = await Sandbox.get_from_id(claimed.service_id);
-
     try {
       if (!claimed.prewarmed) {
         console.log('\nCold path: waiting for the sandbox service to become ready...');
@@ -59,13 +55,21 @@ async function main() {
         console.log('  ✓ Sandbox service is ready');
       }
 
+      // Resolve AFTER the cold path settles: the claimed service's
+      // deployment (and its platform-minted SANDBOX_SECRET) is created
+      // asynchronously — resolving before the wait races it and fails.
+      const sandbox = await Sandbox.get_from_id(claimed.service_id);
+
       const result = await sandbox.exec("echo 'Hello from a pooled sandbox!'");
       console.log(`\n  Sandbox output: ${result.stdout.trim()}`);
       check(result.stdout.trim() === 'Hello from a pooled sandbox!', 'unexpected exec output');
     } finally {
       // A claimed service is detached from the pool and owned by the caller:
-      // delete it like any other sandbox once you are done with it.
-      await sandbox.delete();
+      // delete it like any other sandbox once you are done with it. Resolve
+      // at teardown so a failed cold path still cleans up best-effort.
+      await Sandbox.get_from_id(claimed.service_id)
+        .then((s) => s.delete())
+        .catch(() => {});
       console.log('\n✓ Deleted the claimed sandbox service');
     }
   } finally {

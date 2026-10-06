@@ -194,6 +194,12 @@ export class Sandbox {
       opts.poll_interval,
     );
 
+    // The create reply names the deployment it started: pin it so the
+    // readiness wait never re-fetches the service to find it.
+    if (service.latest_deployment_id) {
+      sandbox.pinDeployment(service.latest_deployment_id);
+    }
+
     if (opts.wait_ready) {
       // Cleanup never masks the original failure: delete errors are swallowed
       // and the readiness outcome (error or timeout note) is rethrown.
@@ -342,6 +348,23 @@ export class Sandbox {
     this._deployment_id = deploymentId;
   }
 
+  /** Seed the executor address from a deployment already in hand. */
+  private seedConnInfoFromDeployment(deployment: koyeb.Deployment): void {
+    if (this._conn_info) {
+      return;
+    }
+
+    const sandbox = (deployment.metadata as koyeb.DeploymentMetadata | undefined)?.sandbox;
+
+    if (sandbox?.public_url && sandbox?.routing_key && this.sandbox_secret) {
+      this._conn_info = {
+        public_url: `${sandbox.public_url}/koyeb-sandbox`,
+        routing_key: sandbox.routing_key,
+        secret: this.sandbox_secret,
+      };
+    }
+  }
+
   /** Drop cached connection state after a redeployment, pinning the new deployment. */
   private resetConnectionState(deploymentId?: string): void {
     this._deployment_id = deploymentId;
@@ -375,6 +398,9 @@ export class Sandbox {
     // Reconnected handles poll the deployment they resolved, even if the
     // service later rolls to another one.
     sandbox.pinDeployment(deploymentId);
+    // The deployment is in hand with its metadata: seed the executor
+    // address so the first connected call needs no extra lookup.
+    sandbox.seedConnInfoFromDeployment(deployment);
 
     return sandbox;
   }
@@ -431,10 +457,17 @@ export class Sandbox {
       const deployment = await this.api.getDeployment(deploymentId);
 
       if (classifyDeploymentStatus(deployment.status) === 'terminal_failure') {
-        throw new SandboxDeploymentError(this.name, deployment.status ?? 'UNKNOWN');
+        throw new SandboxDeploymentError(this.name, deployment.status ?? ('UNKNOWN' as koyeb.DeploymentStatus));
       }
 
-      return classifyDeploymentStatus(deployment.status) === 'ready';
+      if (classifyDeploymentStatus(deployment.status) === 'ready') {
+        // The healthy deployment publishes the executor address: seed it
+        // so the executor phase needs no extra lookup.
+        this.seedConnInfoFromDeployment(deployment);
+        return true;
+      }
+
+      return false;
     } catch (error) {
       // Only the terminal-state signal matters; anything else keeps polling.
       if (error instanceof SandboxDeploymentError) {
@@ -562,13 +595,27 @@ export class Sandbox {
     const service = await this.api.getService(this.service_id);
     const deployment = await this.api.getDeployment(service.latest_deployment_id!);
 
-    await this.api.updateService(this.service_id, {
+    const updated = await this.api.updateService(this.service_id, {
       definition: deployment.definition,
       life_cycle: {
         delete_after_create: parseDuration(values?.delete_after_delay),
         delete_after_sleep: parseDuration(values?.delete_after_inactivity_delay),
       },
     });
+
+    // The update redeploys: pin the replacement so wait_ready() polls it.
+    // The lifecycle is already applied, so a failed id lookup must not
+    // surface as an update failure.
+    let newDeploymentId: string | undefined;
+
+    try {
+      newDeploymentId =
+        updated?.latest_deployment_id ?? (await this.api.getService(this.service_id)).latest_deployment_id;
+    } catch {
+      // Readiness resolves the id fresh when no pin is set.
+    }
+
+    this.resetConnectionState(newDeploymentId);
   }
 
   /**

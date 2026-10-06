@@ -143,9 +143,12 @@ export class SandboxServiceError extends SandboxRequestError {
 
 /** The sandbox deployment reached a terminal error state and will not become ready (Python parity). */
 export class SandboxDeploymentError extends SandboxError {
-  constructor(name: string, status: string) {
+  constructor(
+    public readonly sandbox_name: string,
+    public readonly status: koyeb.DeploymentStatus,
+  ) {
     super(
-      `Sandbox '${name}' deployment reached status ${status} — it will not become ready; wake or redeploy the sandbox.`,
+      `Sandbox '${sandbox_name}' deployment reached status ${status} — it will not become ready; wake or redeploy the sandbox.`,
     );
   }
 }

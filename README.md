@@ -220,17 +220,17 @@ await pool.delete();
 
 ## Sandbox Lifecycle & Metadata
 
-| Method                                                   | Description                                                                      |
-| -------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `wait_ready(timeout?, pollInterval?, signal?)`           | Polls health until success or timeout. Resolves to `true` on success.            |
-| `wait_tcp_proxy_ready(timeout?, pollInterval?, signal?)` | Polls until TCP proxy information becomes available.                             |
-| `is_healthy()`                                           | Performs a `/health` check against the sandbox URL.                              |
-| `get_sandbox_url()`                                      | Returns the HTTPS URL (`https://<domain>/koyeb-sandbox`).                        |
-| `get_tcp_proxy_info()`                                   | Returns `[host, publicPort]` once the TCP proxy is ready, otherwise `undefined`. |
-| `get_domain()`                                           | Fetches and caches the sandbox domain metadata.                                  |
-| `update_lifecycle()`                                     | Change the auto deletion properties.                                             |
-| `update_network_policy(values?)`                         | Update the egress policy (block, allowlist, or reset). Triggers a redeployment.  |
-| `delete()`                                               | Tears down the underlying service.                                               |
+| Method                                                   | Description                                                                                                                                                                                                                                                                                             |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wait_ready(timeout?, pollInterval?, signal?)`           | Waits for the deployment to be `HEALTHY`, then for `/health` to answer, polling with backoff from 0.1 s up to `pollInterval` (default 0.5 s). Resolves to `true` once ready, `false` on timeout; throws `SandboxDeploymentError` as soon as the deployment reaches a status that will not become ready. |
+| `wait_tcp_proxy_ready(timeout?, pollInterval?, signal?)` | Polls until TCP proxy information becomes available.                                                                                                                                                                                                                                                    |
+| `is_healthy()`                                           | Performs a `/health` check against the sandbox URL.                                                                                                                                                                                                                                                     |
+| `get_sandbox_url()`                                      | Returns the HTTPS URL (`https://<domain>/koyeb-sandbox`).                                                                                                                                                                                                                                               |
+| `get_tcp_proxy_info()`                                   | Returns `[host, publicPort]` once the TCP proxy is ready, otherwise `undefined`.                                                                                                                                                                                                                        |
+| `get_domain()`                                           | Fetches and caches the sandbox domain metadata.                                                                                                                                                                                                                                                         |
+| `update_lifecycle()`                                     | Change the auto deletion properties.                                                                                                                                                                                                                                                                    |
+| `update_network_policy(values?)`                         | Update the egress policy (block, allowlist, or reset). Triggers a redeployment.                                                                                                                                                                                                                         |
+| `delete()`                                               | Tears down the underlying service.                                                                                                                                                                                                                                                                      |
 
 ## Command Execution
 
@@ -346,6 +346,7 @@ The SDK exports the following error classes for granular handling. Every one of 
 - `MissingApiTokenError`
 - `InvalidPortError`
 - `SandboxTimeoutError`
+- `SandboxDeploymentError`
 - `NoSandboxSecretError`
 - `SandboxRequestError` — executor non-OK responses (carries `status_code` + `body`)
 - `SandboxApiError` — non-2xx API responses (carries `status` + `body`)

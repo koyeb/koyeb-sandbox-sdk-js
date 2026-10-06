@@ -5,10 +5,16 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # caps peak runner demand when many PRs update at once
+      max-parallel: 1
       matrix:
         node-version: [20, 22]
 

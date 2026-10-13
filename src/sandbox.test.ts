@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { Duration } from './duration.js';
 import { SandboxDeploymentError } from './errors.js';
 import { Sandbox } from './sandbox.js';
 import { completeEvent, sseResponse } from './test-support.js';
@@ -9,7 +10,7 @@ import { completeEvent, sseResponse } from './test-support.js';
 const API = 'http://api.test';
 const GATEWAY = 'http://gateway.test';
 
-type Call = { method: string; url: string; path: string; headers: Headers };
+type Call = { method: string; url: string; path: string; headers: Headers; body?: unknown };
 type Handler = (call: Call) => Response | Error | Promise<Response | Error>;
 
 function jsonResponse(body: unknown, status = 200) {
@@ -41,7 +42,8 @@ function fakeFetch(routes: Record<string, Handler | (Response | Error)[]>) {
   const fetch = vi.fn(async (input: Request | string, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
-    const call = { method: request.method, url: request.url, path: url.pathname, headers: request.headers };
+    const body = await request.clone().json().catch(() => undefined);
+    const call = { method: request.method, url: request.url, path: url.pathname, headers: request.headers, body };
     calls.push(call);
 
     const key = `${call.method} ${call.path}`;
@@ -187,6 +189,30 @@ describe('Sandbox.update_lifecycle', () => {
       'GET /v1/deployments/dep-2',
       'GET /koyeb-sandbox/health',
     ]);
+  });
+
+  it.each([
+    ['updating delete_after_delay keeps delete_after_inactivity_delay', { delete_after_delay: 600 }, { delete_after_create: 600, delete_after_sleep: 300 }],
+    ['updating delete_after_inactivity_delay keeps delete_after_delay', { delete_after_inactivity_delay: '10m' }, { delete_after_create: 60, delete_after_sleep: 600 }],
+  ] satisfies [
+    string,
+    { delete_after_delay?: Duration; delete_after_inactivity_delay?: Duration },
+    { delete_after_create: number; delete_after_sleep: number },
+  ][])('merges with the existing life cycle: %s', async (_, update, expected) => {
+    const { fetch, calls } = fakeFetch({
+      'GET /v1/services/svc-1': [
+        jsonResponse({ service: service({ life_cycle: { delete_after_create: 60, delete_after_sleep: 300 } }) }),
+      ],
+      'GET /v1/deployments/dep-1': [jsonResponse({ deployment: deployment('HEALTHY') })],
+      'PUT /v1/services/svc-1': [jsonResponse({ service: service({ latest_deployment_id: 'dep-2' }) })],
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    const sandbox = await Sandbox.get_from_id('svc-1', 'token');
+    await sandbox.update_lifecycle(update);
+
+    const put = calls.find((call) => call.method === 'PUT')!;
+    expect((put.body as { life_cycle?: unknown }).life_cycle).toEqual(expected);
   });
 });
 

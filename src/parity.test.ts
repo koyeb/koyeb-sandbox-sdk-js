@@ -954,3 +954,102 @@ describe('readiness parity', () => {
     expect(elapsed).toBeLessThan(1_000);
   });
 });
+
+describe('expose_port best-effort unbind parity with the Python SDK', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('proceeds to bind when the pre-unbind fails because nothing is bound yet', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'get_domain').mockResolvedValue('https://sbx.example.org');
+    const fetch = vi.spyOn(sandbox, 'fetch').mockImplementation(async (path) => {
+      if (path === '/unbind_port') {
+        // Nothing was bound yet: the executor rejects the unbind.
+        return jsonResponse({ error: 'no port bound' }, 404);
+      }
+      return jsonResponse({ port: '8080' });
+    });
+
+    const result = await sandbox.expose_port(8080);
+
+    expect(result).toEqual({ port: 8080, exposed_at: 'https://sbx.example.org' });
+    // The unbind was attempted first, its failure did not stop the bind.
+    expect(fetch.mock.calls.map((call) => call[0])).toEqual(['/unbind_port', '/bind_port']);
+    expect(fetch.mock.calls[1]).toMatchObject(['/bind_port', { method: 'POST' }, { port: '8080' }]);
+  });
+
+  it('unbinds the previous port before binding the new one', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'get_domain').mockResolvedValue('https://sbx.example.org');
+    const fetch = vi.spyOn(sandbox, 'fetch').mockImplementation(async () => jsonResponse({ port: '8080' }));
+
+    const result = await sandbox.expose_port(8080);
+
+    expect(result).toEqual({ port: 8080, exposed_at: 'https://sbx.example.org' });
+    expect(fetch.mock.calls.map((call) => call[0])).toEqual(['/unbind_port', '/bind_port']);
+  });
+});
+
+describe('kill_all_processes best-effort parity with the Python SDK', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('continues past failed kills and returns the count of successes', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const killAttempts: string[] = [];
+    vi.spyOn(sandbox, 'fetch').mockImplementation(async (path, _init, body) => {
+      if (path === '/list_processes') {
+        return jsonResponse({
+          processes: [
+            { id: 'p-1', command: 'sleep 1', status: 'running', pid: '11' },
+            { id: 'p-2', command: 'sleep 2', status: 'running', pid: '12' },
+            { id: 'p-3', command: 'sleep 3', status: 'running', pid: '13' },
+            // Python only kills running processes; an exited one is never attempted.
+            { id: 'p-4', command: 'true', status: 'completed', pid: '14' },
+          ],
+        });
+      }
+
+      const id = (body as { id: string }).id;
+      killAttempts.push(id);
+      if (id === 'p-2') {
+        return jsonResponse({ error: 'process already dead' }, 404);
+      }
+      return jsonResponse({});
+    });
+
+    const count = await sandbox.kill_all_processes();
+
+    // Every running process was attempted — the loop did not stop at p-2.
+    expect(killAttempts).toEqual(['p-1', 'p-2', 'p-3']);
+    expect(count).toBe(2);
+  });
+
+  it('propagates failures that are not SandboxError, like Python except SandboxError', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const kills: string[] = [];
+    vi.spyOn(sandbox, 'request').mockImplementation(async (path, _init, body) => {
+      if (path === '/list_processes') {
+        return {
+          processes: [
+            { id: 'p-1', command: 'sleep 1', status: 'running', pid: '11' },
+            { id: 'p-2', command: 'sleep 2', status: 'running', pid: '12' },
+          ],
+        };
+      }
+
+      const id = (body as { id: string }).id;
+      kills.push(id);
+      if (id === 'p-2') {
+        throw new TypeError('wire cut');
+      }
+      return {};
+    });
+
+    await expect(sandbox.kill_all_processes()).rejects.toBeInstanceOf(TypeError);
+    // The loop stopped at the non-SDK failure instead of swallowing it.
+    expect(kills).toEqual(['p-1', 'p-2']);
+  });
+});

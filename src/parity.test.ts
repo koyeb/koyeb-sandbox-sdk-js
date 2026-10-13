@@ -1,4 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { KoyebApi, koyeb } from './api.js';
 import { DEFAULT_INSTANCE_WAIT_TIMEOUT, DEFAULT_POLL_INTERVAL } from './constants.js';
@@ -34,6 +38,19 @@ function jsonResponse(body: unknown, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+/** A sandbox whose executor `request` transport is a resettable mock. */
+function sandboxWithMockedRequest(): { sandbox: Sandbox; request: Mock } {
+  const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+  const request: Mock = vi.fn();
+
+  beforeEach(() => {
+    request.mockReset();
+    vi.spyOn(sandbox as never, 'request').mockImplementation(request as never);
+  });
+
+  return { sandbox, request };
 }
 
 describe('constants parity with the Python SDK', () => {
@@ -137,13 +154,7 @@ describe('filesystem fallbacks escape paths', () => {
 });
 
 describe('filesystem executor error mapping', () => {
-  const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
-  const request = vi.fn();
-
-  beforeEach(() => {
-    request.mockReset();
-    vi.spyOn(sandbox as never, 'request').mockImplementation(request as never);
-  });
+  const { sandbox, request } = sandboxWithMockedRequest();
 
   it('maps the executor\'s raw error strings to SandboxFileNotFoundError', async () => {
     request.mockResolvedValue({ error: 'open /data/missing: no such file or directory' });
@@ -171,6 +182,41 @@ describe('filesystem executor error mapping', () => {
       content: 'hello',
       encoding: 'utf-8',
     });
+  });
+});
+
+describe('file transfer direction parity with the Python SDK and CLI', () => {
+  const { sandbox, request } = sandboxWithMockedRequest();
+  let localPath: string;
+
+  beforeEach(() => {
+    localPath = join(tmpdir(), `k6568-${randomUUID()}.txt`);
+  });
+
+  afterEach(async () => {
+    await rm(localPath, { force: true });
+  });
+
+  it('download_file reads remote_path first and writes local_path second', async () => {
+    // The mock echoes the remote path it was asked to read; if the SDK
+    // mixed up the arguments, the local file would hold the wrong content
+    // (or the read would target the local path instead).
+    request.mockImplementation(async (_path, _init, body) => ({
+      content: `content-of:${(body as { path: string }).path}`,
+      encoding: 'utf-8',
+    }));
+
+    await sandbox.filesystem.download_file('/remote/source.txt', localPath);
+
+    expect(await readFile(localPath, 'utf-8')).toBe('content-of:/remote/source.txt');
+  });
+
+  it('upload_file reads local_path first and writes remote_path second', async () => {
+    await writeFile(localPath, 'local-bytes');
+
+    await sandbox.filesystem.upload_file(localPath, '/remote/dest.txt');
+
+    expect(request.mock.calls[0][2]).toEqual({ path: '/remote/dest.txt', content: 'local-bytes' });
   });
 });
 

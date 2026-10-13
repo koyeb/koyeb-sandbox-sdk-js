@@ -50,19 +50,44 @@ describe('Snapshot', () => {
     await expect(Snapshot.get('snap-1', { api_token: 't' })).rejects.toBeInstanceOf(SandboxError);
   });
 
-  it('list maps filters to the API query', async () => {
+  it('list maps the shared parity filter set to the API query', async () => {
     const listSpy = vi
       .spyOn(KoyebApi.prototype, 'listInstanceSnapshots')
       .mockResolvedValue([MODEL] as never);
 
-    const snapshots = await Snapshot.list({ type: 'FULL', status: 'ERROR', limit: '10', api_token: 't' });
+    // The filter set shared with the Python SDK, pinned end-to-end.
+    const snapshots = await Snapshot.list({
+      type: 'FULL',
+      status: 'ERROR',
+      name: 'snap',
+      service_id: 'svc-1',
+      limit: '10',
+      offset: '20',
+      api_token: 't',
+    });
 
     expect(listSpy.mock.calls[0][0]).toEqual({
       type: 'INSTANCE_SNAPSHOT_TYPE_FULL',
       statuses: ['INSTANCE_SNAPSHOT_STATUS_ERROR'],
+      name: 'snap',
       limit: '10',
+      offset: '20',
     });
     expect(snapshots[0].snapshot_type).toBe('FILESYSTEM');
+  });
+
+  it('list filters by service_id client-side', async () => {
+    const listSpy = vi.spyOn(KoyebApi.prototype, 'listInstanceSnapshots').mockResolvedValue([
+      MODEL,
+      { ...MODEL, id: 'snap-2', service_id: 'svc-2' },
+    ] as never);
+
+    const snapshots = await Snapshot.list({ service_id: 'svc-2', api_token: 't' });
+
+    expect(listSpy.mock.calls[0][0]).toEqual({});
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0].id).toBe('snap-2');
+    expect(snapshots[0].service_id).toBe('svc-2');
   });
 
   it('refresh updates state from the API but keeps operations', async () => {

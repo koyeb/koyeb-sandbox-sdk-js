@@ -44,6 +44,7 @@ export type ListSnapshotsFilter = Partial<{
   type: SnapshotType;
   status: SnapshotStatus;
   name: string;
+  service_id: string;
   limit: string;
   offset: string;
   api_token: string;
@@ -99,8 +100,9 @@ export class Snapshot {
       }),
     );
 
+    // The list endpoint has no service_id query param — the SDK filters the page.
     return models
-      .filter((model) => model.id)
+      .filter((model) => model.id && (filter.service_id === undefined || model.service_id === filter.service_id))
       .map((model) => Snapshot.from_model(model, { api_token: token, host: filter.host }));
   }
 

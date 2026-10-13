@@ -125,6 +125,7 @@ export class SandboxFilesystem {
     return result.code === 0;
   }
 
+  /** Uploads local_path from the caller's machine to remote_path in the sandbox. */
   async upload_file(local_path: string, remote_path: string): Promise<void> {
     const fs = await import('node:fs/promises');
     const content = await fs.readFile(local_path);
@@ -132,7 +133,11 @@ export class SandboxFilesystem {
     await this.write_file(remote_path, content.toString());
   }
 
-  async download_file(local_path: string, remote_path: string): Promise<void> {
+  /**
+   * Downloads remote_path from the sandbox to local_path on the caller's machine.
+   * Same argument order as the Python SDK and the CLI: remote first, local second.
+   */
+  async download_file(remote_path: string, local_path: string): Promise<void> {
     const fs = await import('node:fs/promises');
     const fileInfo = await this.read_file(remote_path);
 

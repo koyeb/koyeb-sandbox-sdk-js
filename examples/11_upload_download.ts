@@ -20,7 +20,7 @@ async function main() {
   console.log(uploaded_info.content);
 
   await fs.write_file('/tmp/download_source.txt', 'Download test content\nMultiple lines');
-  await fs.download_file(downloaded_file, '/tmp/download_source.txt');
+  await fs.download_file('/tmp/download_source.txt', downloaded_file);
   console.log((await readFile(downloaded_file)).toString());
 }
 

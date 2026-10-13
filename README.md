@@ -300,8 +300,23 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 | `exists(path)`                         | Return `true` if the path exists.                     |
 | `is_file(path)`                        | Return `true` if the path is a regular file.          |
 | `is_dir(path)`                         | Return `true` if the path is a directory.             |
-| `upload_file(localPath, remotePath)`   | Read a local file and upload it.                      |
-| `download_file(localPath, remotePath)` | Download a sandbox file to disk.                      |
+| `upload_file(localPath, remotePath)`   | Read a local file and upload it to the sandbox.       |
+| `download_file(remotePath, localPath)` | Download a sandbox file to your local disk.           |
+
+> **Warning — breaking change:** `download_file` now takes `(remotePath, localPath)`,
+> matching the Python SDK and the CLI. Both transfers read their arguments in the
+> direction of the transfer: `upload_file(localPath, remotePath)` and
+> `download_file(remotePath, localPath)`. Previously this SDK took
+> `download_file(localPath, remotePath)` — the opposite of every other Koyeb client —
+> so code ported from Python or the CLI silently wrote to the wrong path.
+>
+> ```ts
+> // Before
+> await sandbox.filesystem.download_file(localPath, remotePath);
+>
+> // After — same argument order as Python and the CLI
+> await sandbox.filesystem.download_file(remotePath, localPath);
+> ```
 
 ## Snapshots
 

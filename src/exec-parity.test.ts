@@ -35,7 +35,35 @@ describe('exec parity with the Python SDK', () => {
     const result = await sandbox.exec('echo hello');
 
     expect(fetch.mock.calls[0]).toMatchObject(['/run_streaming', { method: 'POST' }, { cmd: 'echo hello' }]);
-    expect(result).toEqual({ stdout: 'hello', stderr: 'warn', code: 0 });
+    expect(result).toEqual({
+      stdout: 'hello',
+      stderr: 'warn',
+      code: 0,
+      command: 'echo hello',
+      duration: expect.any(Number),
+    });
+  });
+
+  it('carries duration and command like Python CommandResult (streaming route)', async () => {
+    const sandbox = makeSandbox();
+    vi.spyOn(sandbox, 'fetch').mockResolvedValue(
+      sseResponse([output('stdout', 'hello'), complete({ code: 0, error: false })]),
+    );
+
+    const result = await sandbox.exec('echo hello');
+
+    expect(result.command).toBe('echo hello');
+    expect(result.duration).toBeGreaterThanOrEqual(0);
+  });
+
+  it('carries duration and command on the buffered route too', async () => {
+    const sandbox = makeSandbox();
+    vi.spyOn(sandbox, 'request').mockResolvedValue({ stdout: 'out', code: 0 } as never);
+
+    const result = await sandbox.exec('uptime', { stream: false });
+
+    expect(result.command).toBe('uptime');
+    expect(result.duration).toBeGreaterThanOrEqual(0);
   });
 
   it('feeds on_stdout/on_stderr chunks live and skips buffering, like Python', async () => {
@@ -53,7 +81,7 @@ describe('exec parity with the Python SDK', () => {
 
     expect(stdout).toEqual(['a']);
     expect(stderr).toEqual(['b']);
-    expect(result).toEqual({ stdout: '', stderr: '', code: 0 });
+    expect(result).toEqual({ stdout: '', stderr: '', code: 0, command: 'x', duration: expect.any(Number) });
   });
 
   it('returns non-zero results untouched unless raise_on_error is opted in', async () => {
@@ -62,7 +90,7 @@ describe('exec parity with the Python SDK', () => {
 
     const result = await sandbox.exec('boom');
 
-    expect(result).toEqual({ stdout: '', stderr: '', code: 3 });
+    expect(result).toEqual({ stdout: '', stderr: '', code: 3, command: 'boom', duration: expect.any(Number) });
   });
 
   it('raise_on_error throws SandboxCommandError with the Python message and result', async () => {
@@ -81,6 +109,7 @@ describe('exec parity with the Python SDK', () => {
       stdout: '',
       stderr: 'kaput',
       code: 2,
+      duration: expect.any(Number),
     });
     // Python's CommandResult spells the exit code exit_code and carries success.
     expect((error as SandboxCommandError).exit_code).toBe(2);
@@ -93,12 +122,12 @@ describe('exec parity with the Python SDK', () => {
 
     const result = await sandbox.exec('cmd', { stream: false });
 
-    expect(result).toEqual({ stdout: '', stderr: 'warn', code: 0 });
+    expect(result).toEqual({ stdout: '', stderr: 'warn', code: 0, command: 'cmd', duration: expect.any(Number) });
   });
 
   it('exposes the exec types from the package root', () => {
     const options: ExecOptions = { timeout: 5, stream: false };
-    const result: ExecResult = { stdout: '', stderr: '', code: 0 };
+    const result: ExecResult = { stdout: '', stderr: '', code: 0, command: '', duration: 0 };
 
     expect(options).toBeDefined();
     expect(result).toBeDefined();
@@ -113,7 +142,7 @@ describe('exec parity with the Python SDK', () => {
     const result = await sandbox.exec('cmd', { stream: false });
     expect(request.mock.calls[0][0]).toBe('/run');
     expect(request.mock.calls[0][1]).toMatchObject({ method: 'POST' });
-    expect(result).toEqual({ stdout: 'out', stderr: 'bad', code: 9 });
+    expect(result).toEqual({ stdout: 'out', stderr: 'bad', code: 9, command: 'cmd', duration: expect.any(Number) });
 
     const error = await sandbox.exec('cmd', { stream: false, raise_on_error: true }).catch(
       (error: unknown) => error,
@@ -128,7 +157,13 @@ describe('exec parity with the Python SDK', () => {
 
     const result = await sandbox.exec('boom');
 
-    expect(result).toEqual({ stdout: '', stderr: 'failed to start', code: 1 });
+    expect(result).toEqual({
+      stdout: '',
+      stderr: 'failed to start',
+      code: 1,
+      command: 'boom',
+      duration: expect.any(Number),
+    });
   });
 
   it('maps deadline aborts to the Python timeout error', async () => {
@@ -264,7 +299,7 @@ describe('SSE parser robustness', () => {
 
     const result = await sandbox.exec('x');
 
-    expect(result).toEqual({ stdout: 'hi', stderr: '', code: 7 });
+    expect(result).toEqual({ stdout: 'hi', stderr: '', code: 7, command: 'x', duration: expect.any(Number) });
   });
 
   it('prefers an explicit exit code over an error field, like Python', async () => {
@@ -275,7 +310,7 @@ describe('SSE parser robustness', () => {
 
     const result = await sandbox.exec('x');
 
-    expect(result).toEqual({ stdout: '', stderr: '', code: 5 });
+    expect(result).toEqual({ stdout: '', stderr: '', code: 5, command: 'x', duration: expect.any(Number) });
   });
 
   it('handles the executor error event for failed command starts', async () => {
@@ -286,7 +321,13 @@ describe('SSE parser robustness', () => {
 
     const result = await sandbox.exec('broken');
 
-    expect(result).toEqual({ stdout: '', stderr: 'Failed to start command', code: 1 });
+    expect(result).toEqual({
+      stdout: '',
+      stderr: 'Failed to start command',
+      code: 1,
+      command: 'broken',
+      duration: expect.any(Number),
+    });
   });
 
   it('turns malformed event data into a failed result like Python', async () => {

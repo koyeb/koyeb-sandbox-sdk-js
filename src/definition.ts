@@ -6,6 +6,18 @@ import { buildNetworkPolicy } from './cidr.js';
 
 export const DEFAULT_CONFIG_FILE_PERMISSIONS = '0644';
 
+/** Protocols valid for the sandbox's exposed port (Python: VALID_DEPLOYMENT_PORT_PROTOCOLS). */
+const VALID_PORT_PROTOCOLS = ['http', 'http2'] as const;
+
+/** Runtime check so an invalid protocol fails at create, not just at the TypeScript type. */
+function validatePortProtocol(protocol: string): void {
+  if (!(VALID_PORT_PROTOCOLS as readonly string[]).includes(protocol)) {
+    throw new Error(
+      `Invalid protocol '${protocol}'. Must be one of (${VALID_PORT_PROTOCOLS.map((p) => `'${p}'`).join(', ')})`,
+    );
+  }
+}
+
 /**
  * Reference to a Koyeb secret by name. A full `koyeb.Secret` object also satisfies this
  * structurally (its `name` field is read at render time).
@@ -131,6 +143,10 @@ export function buildDefinition(
   const network_policy = buildNetworkPolicy(opts.block_network, opts.outbound_allowlist);
 
   const type = opts.type ?? 'SANDBOX';
+
+  if (opts.exposed_port_protocol !== undefined) {
+    validatePortProtocol(opts.exposed_port_protocol);
+  }
 
   const ports =
     opts.ports ??

@@ -21,7 +21,7 @@ describe('CommandRunner', () => {
     const result = await runner.run('cmd', { stream: false });
 
     expect(post.mock.calls[0]).toEqual(['/run', { method: 'POST', signal: expect.any(AbortSignal) }, { cmd: 'cmd', cwd: undefined, env: undefined }, { onAttempt: expect.any(Function) }]);
-    expect(result).toEqual({ stdout: '', stderr: 'warn', code: 0 });
+    expect(result).toEqual({ stdout: '', stderr: 'warn', code: 0, command: 'cmd', duration: expect.any(Number) });
   });
 
   it('reassembles the SSE stream through the raw seam', async () => {
@@ -33,7 +33,7 @@ describe('CommandRunner', () => {
     const result = await runner.run('cmd');
 
     expect(raw.mock.calls[0][0]).toBe('/run_streaming');
-    expect(result).toEqual({ stdout: 'a', stderr: 'b', code: 3 });
+    expect(result).toEqual({ stdout: 'a', stderr: 'b', code: 3, command: 'cmd', duration: expect.any(Number) });
   });
 
   it('raises SandboxCommandError when opted in', async () => {

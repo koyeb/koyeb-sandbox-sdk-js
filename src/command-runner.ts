@@ -13,7 +13,18 @@ export type SandboxExec = TypedEventTarget<{
 }>;
 
 /** Result of a command run through {@link Sandbox.exec} (Python: CommandResult). */
-export type ExecResult = { stdout: string; stderr: string; code: number };
+export type ExecResult = {
+  stdout: string;
+  stderr: string;
+  code: number;
+  /** The command string as passed to exec (Python: CommandResult.command). */
+  command: string;
+  /** Wall-clock runtime in seconds, measured client-side (Python: CommandResult.duration). */
+  duration: number;
+};
+
+/** The core result both routes assemble; `run` stamps command and duration on it. */
+type ExecRouteResult = Omit<ExecResult, 'command' | 'duration'>;
 
 /** Options shared by the buffered and streaming exec routes. */
 type ExecRouteOptions = {
@@ -68,15 +79,20 @@ export class CommandRunner {
       signal,
     }: ExecOptions = {},
   ): Promise<ExecResult> {
+    // Python times the whole call client-side: duration is wall-clock seconds
+    // from just before the route fires to the result being assembled.
+    const start = performance.now();
     const result = await (stream
       ? this.runStreaming(cmd, { cwd, env, timeout, on_stdout, on_stderr, signal })
       : this.runBuffered(cmd, { cwd, env, timeout, signal }));
 
-    if (raise_on_error && result.code !== 0) {
-      throw new SandboxCommandError({ command: cmd, ...result });
+    const finished = { ...result, command: cmd, duration: (performance.now() - start) / 1_000 };
+
+    if (raise_on_error && finished.code !== 0) {
+      throw new SandboxCommandError(finished);
     }
 
-    return result;
+    return finished;
   }
 
   /** Raw SSE emitter: stdout/stderr chunks, the exit payload, then end. */
@@ -93,7 +109,10 @@ export class CommandRunner {
   }
 
   /** Buffered route: one POST to /run, carrying the retrying request machinery. */
-  private async runBuffered(cmd: string, { cwd, env, timeout, signal }: ExecRouteOptions): Promise<ExecResult> {
+  private async runBuffered(
+    cmd: string,
+    { cwd, env, timeout, signal }: ExecRouteOptions,
+  ): Promise<ExecRouteResult> {
     const deadline = new Deadline(timeout, signal);
 
     try {
@@ -123,7 +142,7 @@ export class CommandRunner {
       on_stderr,
       signal,
     }: ExecRouteOptions & Pick<ExecOptions, 'on_stdout' | 'on_stderr'>,
-  ): Promise<ExecResult> {
+  ): Promise<ExecRouteResult> {
     // Python parity: callbacks consume chunks live; output is only buffered when neither is set.
     const buffer = !on_stdout && !on_stderr;
     const stdout: string[] = [];

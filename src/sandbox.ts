@@ -588,6 +588,15 @@ export class Sandbox {
     return conn_info.public_url;
   }
 
+  /**
+   * Update the sandbox's life cycle settings.
+   *
+   * Python parity: caller-supplied fields merge into the life cycle the service already
+   * has — fields the call leaves out keep their current value instead of being cleared.
+   *
+   * Like the Python SDK, the update redeploys the service; the replacement deployment is
+   * pinned so a later wait_ready() follows it.
+   */
   async update_lifecycle(values?: {
     delete_after_delay?: Duration;
     delete_after_inactivity_delay?: Duration;
@@ -595,12 +604,18 @@ export class Sandbox {
     const service = await this.api.getService(this.service_id);
     const deployment = await this.api.getDeployment(service.latest_deployment_id!);
 
+    // Start from the current life cycle, then overwrite only the fields the caller supplied.
+    const life_cycle = { ...service.life_cycle };
+    if (values?.delete_after_delay !== undefined) {
+      life_cycle.delete_after_create = parseDuration(values.delete_after_delay);
+    }
+    if (values?.delete_after_inactivity_delay !== undefined) {
+      life_cycle.delete_after_sleep = parseDuration(values.delete_after_inactivity_delay);
+    }
+
     const updated = await this.api.updateService(this.service_id, {
       definition: deployment.definition,
-      life_cycle: {
-        delete_after_create: parseDuration(values?.delete_after_delay),
-        delete_after_sleep: parseDuration(values?.delete_after_inactivity_delay),
-      },
+      life_cycle,
     });
 
     // The update redeploys: pin the replacement so wait_ready() polls it.

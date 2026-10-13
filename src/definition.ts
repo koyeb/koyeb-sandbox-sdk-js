@@ -1,6 +1,6 @@
 import type { koyeb } from './api.js';
 import { DEFAULT_IDLE_TIMEOUT } from './constants.js';
-import { randomString } from './id.js';
+import { randomTokenUrlSafe } from './id.js';
 import { getEnv } from './prelude.js';
 import { buildNetworkPolicy } from './cidr.js';
 
@@ -168,7 +168,7 @@ export function buildDefinition(
     ...(routes && { routes }),
   };
 
-  const sandbox_secret = pool ? undefined : opts.sandbox_secret ?? randomString(32);
+  const sandbox_secret = pool ? undefined : (opts.sandbox_secret ?? randomTokenUrlSafe(32));
 
   // Pools never inject an SDK-generated secret: user env passes through
   // verbatim and the platform mints one server-side when the definition has none.

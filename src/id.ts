@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+
 export function createArray<T>(length: number, init: (index: number) => T) {
   return Array(length)
     .fill(null)
@@ -25,3 +27,12 @@ export function nanoId(alphabet: string) {
 }
 
 export const randomString = nanoId('-_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz');
+
+/**
+ * Crypto-secure URL-safe token: `bytes` random bytes, base64url-encoded.
+ * The `secrets.token_urlsafe(32)` equivalent — 32 bytes yield a 43-char
+ * (256-bit) URL-safe string. Use for secrets; `randomString` is not secure.
+ */
+export function randomTokenUrlSafe(bytes: number) {
+  return randomBytes(bytes).toString('base64url');
+}

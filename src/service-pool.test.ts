@@ -193,6 +193,46 @@ describe('ServicePool.create', () => {
   });
 });
 
+describe('ServicePool.list', () => {
+  it('passes the name and status filters through to the list endpoint', async () => {
+    const fetch = vi.fn(
+      async (request: Request) =>
+        new Response(JSON.stringify({ service_pools: [{ id: 'pool-1', name: 'my-pool' }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    );
+    vi.stubGlobal('fetch', fetch);
+
+    const found = await ServicePool.list({ name: 'my-pool', status: 'ready', api_token: 't' });
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toBeInstanceOf(ServicePool);
+    expect(found[0].id).toBe('pool-1');
+
+    const url = new URL(fetch.mock.calls[0][0].url);
+    expect(url.searchParams.get('name')).toBe('my-pool');
+    expect(url.searchParams.get('status')).toBe('ready');
+  });
+
+  it('omits the status query param when no filter is given', async () => {
+    const fetch = vi.fn(
+      async (request: Request) =>
+        new Response(JSON.stringify({ service_pools: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    );
+    vi.stubGlobal('fetch', fetch);
+
+    expect(await ServicePool.list({ api_token: 't' })).toEqual([]);
+
+    const url = new URL(fetch.mock.calls[0][0].url);
+    expect(url.searchParams.has('status')).toBe(false);
+    expect(url.searchParams.has('name')).toBe(false);
+  });
+});
+
 describe('ServicePool.update', () => {
   const liveDefinition = { name: 'my-pool', docker: { image: 'koyeb/sandbox:slim' } };
 

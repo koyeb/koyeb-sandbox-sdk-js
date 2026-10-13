@@ -47,6 +47,12 @@ export type UpdatePoolOptions = Partial<{
 export type ListPoolsOptions = Partial<{
   /** Filter by pool name. */
   name: string;
+  /**
+   * Filter by pool status: `ready`, `provisioning`, `error` or `deleting`.
+   * Lowercase model values, not the uppercase enum name the reply carries;
+   * the API rejects anything else with a 400.
+   */
+  status: string;
   /** Pagination limit (string per the API). */
   limit: string;
   /** Pagination offset (string per the API). */
@@ -137,7 +143,7 @@ export class ServicePool {
   static async list(options: ListPoolsOptions = {}): Promise<ServicePool[]> {
     const { token, client: api } = resolveClient(options);
     const pools = await api.listServicePools(
-      omitUndefined({ name: options.name, limit: options.limit, offset: options.offset }),
+      omitUndefined({ name: options.name, status: options.status, limit: options.limit, offset: options.offset }),
     );
 
     return pools.map((p) => ServicePool._from_model(p, token));

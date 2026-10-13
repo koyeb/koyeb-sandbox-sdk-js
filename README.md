@@ -290,9 +290,9 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 | `mkdir(path, recursive?)`              | Create a directory.                                   |
 | `list_dir(path?)`                      | List entries inside a directory. Defaults to `.`.     |
 | `delete_dir(path)`                     | Delete a directory tree.                              |
-| `write_file(path, content)`            | Create or replace a text file.                        |
-| `write_files(files)`                   | Bulk write helper for multiple files.                 |
-| `read_file(path)`                      | Fetch `{ content, encoding }` for a remote file.      |
+| `write_file(path, content, encoding?)` | Create or replace a file. Strings pass through; `Uint8Array` bytes travel base64-encoded with `encoding: 'base64'`, or decode to text in any other encoding. |
+| `write_files(files)`                   | Bulk write helper; entries carry optional per-file `encoding`. |
+| `read_file(path, encoding?)`           | Fetch `{ content, encoding }`; binary content comes back as `Uint8Array` bytes. |
 | `rename_file(oldPath, newPath)`        | Rename using an internal `mv` command.                |
 | `move_file(src, dst)`                   | Move a file; maps `NO_SUCH_FILE` to `SandboxFileNotFoundError`. |
 | `delete_file(path)`                     | Delete a single file via the executor endpoint.       |
@@ -300,8 +300,8 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 | `exists(path)`                         | Return `true` if the path exists.                     |
 | `is_file(path)`                        | Return `true` if the path is a regular file.          |
 | `is_dir(path)`                         | Return `true` if the path is a directory.             |
-| `upload_file(localPath, remotePath)`   | Read a local file and upload it to the sandbox.       |
-| `download_file(remotePath, localPath)` | Download a sandbox file to your local disk.           |
+| `upload_file(localPath, remotePath, encoding?)`   | Read a local file and upload it to the sandbox; pass `'base64'` for binary files.       |
+| `download_file(remotePath, localPath, encoding?)` | Download a sandbox file to your local disk; binary content lands byte-identical.       |
 
 > **Warning — breaking change:** `download_file` now takes `(remotePath, localPath)`,
 > matching the Python SDK and the CLI. Both transfers read their arguments in the
@@ -317,6 +317,7 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 > // After — same argument order as Python and the CLI
 > await sandbox.filesystem.download_file(remotePath, localPath);
 > ```
+
 
 ## Snapshots
 

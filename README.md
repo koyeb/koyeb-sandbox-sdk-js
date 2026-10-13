@@ -185,7 +185,7 @@ Fetch a pool by id. `options`: `api_token`.
 
 ### `ServicePool.list(options?)`
 
-List pools, optionally filtered by name. `options`: `name`, `limit`, `offset`, `api_token`.
+List pools, optionally filtered by name or status. `options`: `name`, `status`, `limit`, `offset`, `api_token`. The `status` filter takes the lowercase model value — `ready`, `provisioning`, `error` or `deleting`, not the uppercase enum name the reply carries; the API rejects anything else with a 400.
 
 ### `pool.update(options?)`
 

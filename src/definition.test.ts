@@ -86,3 +86,16 @@ describe('buildDefinition region resolution', () => {
   });
 });
 
+describe('buildDefinition sandbox secret generation', () => {
+  it('generates a CSPRNG-backed, URL-safe secret when none is supplied — no Math.random path', () => {
+    const random = vi.spyOn(Math, 'random');
+
+    const { definition, sandbox_secret } = buildDefinition({ name: 'sb', image: 'koyeb/sandbox' });
+
+    // The generation seam must not draw from Math.random.
+    expect(random).not.toHaveBeenCalled();
+    // token_urlsafe(32) strength: base64url of 32 bytes — 43 chars, 256 bits.
+    expect(sandbox_secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(definition.env).toContainEqual({ key: 'SANDBOX_SECRET', value: sandbox_secret });
+  });
+});

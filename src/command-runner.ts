@@ -53,8 +53,14 @@ export type ExecOptions = {
 /** The two transport calls the runner needs, injected so tests fake the seam directly. */
 export type CommandPort = {
   readonly name: string;
-  /** Retrying POST with body parsing and error mapping (Sandbox.request). */
-  post: (path: string, init: RequestInit, body?: unknown, hooks?: { onAttempt?: () => void }) => Promise<any>;
+  /** Retrying POST with body parsing, error mapping, and a request timeout. */
+  post: (
+    path: string,
+    init: RequestInit,
+    body?: unknown,
+    hooks?: { onAttempt?: () => void },
+    options?: { timeout?: number },
+  ) => Promise<any>;
   /** Single authorized request with non-OK mapping (ExecutorGateway.raw). */
   raw: (path: string, init: RequestInit, body?: unknown) => Promise<Response>;
 };
@@ -113,22 +119,17 @@ export class CommandRunner {
     cmd: string,
     { cwd, env, timeout, signal }: ExecRouteOptions,
   ): Promise<ExecRouteResult> {
-    const deadline = new Deadline(timeout, signal);
+    // The gateway owns the per-attempt request budget (Sandbox.request).
+    const reply = await this.port.post(
+      '/run',
+      { method: 'POST', signal },
+      { cmd, cwd, env },
+      undefined,
+      { timeout },
+    );
 
-    try {
-      const reply = await this.port.post(
-        '/run',
-        { method: 'POST', signal: deadline.signal },
-        { cmd, cwd, env },
-        { onAttempt: () => deadline.arm() },
-      );
-      // Normalize like Python's response.get(...) so partial replies type-check.
-      return { stdout: reply?.stdout ?? '', stderr: reply?.stderr ?? '', code: reply?.code ?? 0 };
-    } catch (error) {
-      throw deadline.mapFailure(error, this.port.name);
-    } finally {
-      deadline.dispose();
-    }
+    // Normalize like Python's response.get(...) so partial replies type-check.
+    return { stdout: reply?.stdout ?? '', stderr: reply?.stderr ?? '', code: reply?.code ?? 0 };
   }
 
   /** Streaming route: reassembles the SSE events into a command result, like Python's exec. */

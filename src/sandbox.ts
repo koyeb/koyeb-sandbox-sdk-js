@@ -142,10 +142,10 @@ export class Sandbox {
     this.api = new KoyebApi(this.api_token, undefined, this.host);
     // Transport policy rides on this class's authorized fetch, so the seam
     // tests already mock stays the seam.
-    this.gateway = new ExecutorGateway((path, init, body) => this.fetch(path, init, body));
+    this.gateway = new ExecutorGateway((path, init, body) => this.fetch(path, init, body), { name: this.name });
     this.runner = new CommandRunner({
       name: this.name,
-      post: (path, init, body, hooks) => this.request(path, init, body, hooks),
+      post: (path, init, body, hooks, options) => this.request(path, init, body, hooks, options),
       raw: (path, init, body) => this.gateway.raw(path, init, body),
     });
   }
@@ -801,8 +801,14 @@ export class Sandbox {
     return fetch(`${conn.public_url}${path}`, init);
   }
 
-  async request(path: string, init: RequestInit, requestBody?: unknown, hooks?: { onAttempt?: () => void }) {
-    return this.gateway.post(path, init, requestBody, hooks);
+  async request(
+    path: string,
+    init: RequestInit,
+    requestBody?: unknown,
+    hooks?: { onAttempt?: () => void },
+    options?: { timeout?: number },
+  ) {
+    return this.gateway.post(path, init, requestBody, hooks, options);
   }
 
   get filesystem() {

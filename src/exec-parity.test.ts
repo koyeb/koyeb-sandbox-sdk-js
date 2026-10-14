@@ -267,12 +267,12 @@ describe('exec deadline parity', () => {
   it('forwards caller aborts with one in-flight listener and cleans it up', async () => {
     const sandbox = makeSandbox();
     const controller = new AbortController();
-    let release: (value: unknown) => void = () => {};
-    vi.spyOn(sandbox, 'request').mockImplementation(async () => {
-      await new Promise((resolve) => {
-        release = resolve;
+    vi.spyOn(sandbox, 'fetch').mockImplementation((_path, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        const abort = () => reject(new DOMException('This operation was aborted', 'AbortError'));
+        if (init.signal?.aborted) abort();
+        else init.signal?.addEventListener('abort', abort);
       });
-      return { stdout: '', stderr: '', code: 0 };
     });
 
     const pending = sandbox.exec('x', { stream: false, signal: controller.signal });
@@ -281,10 +281,10 @@ describe('exec deadline parity', () => {
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
 
     controller.abort();
-    release(undefined);
     const error = await pending.catch((error: unknown) => error);
 
     expect(error).not.toBeInstanceOf(SandboxTimeoutError);
+    expect((error as Error).message).toContain('aborted');
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
 });

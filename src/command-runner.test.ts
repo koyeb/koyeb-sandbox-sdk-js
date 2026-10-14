@@ -20,7 +20,13 @@ describe('CommandRunner', () => {
 
     const result = await runner.run('cmd', { stream: false });
 
-    expect(post.mock.calls[0]).toEqual(['/run', { method: 'POST', signal: expect.any(AbortSignal) }, { cmd: 'cmd', cwd: undefined, env: undefined }, { onAttempt: expect.any(Function) }]);
+    expect(post.mock.calls[0]).toEqual([
+      '/run',
+      { method: 'POST', signal: undefined },
+      { cmd: 'cmd', cwd: undefined, env: undefined },
+      undefined,
+      { timeout: 30 },
+    ]);
     expect(result).toEqual({ stdout: '', stderr: 'warn', code: 0, command: 'cmd', duration: expect.any(Number) });
   });
 

@@ -6,6 +6,8 @@ export const DEFAULT_IDLE_TIMEOUT = 300;
 export const DEFAULT_POLL_INTERVAL = 0.5;
 // Command execution timeout in seconds (Python parity).
 export const DEFAULT_COMMAND_TIMEOUT = 30;
+// Default HTTP timeout for every executor request (Python parity).
+export const DEFAULT_HTTP_TIMEOUT = 30;
 // First delay of a readiness wait: doubles up to DEFAULT_POLL_INTERVAL (Python parity).
 export const DEFAULT_WAIT_START_INTERVAL = 0.1;
 export const PORT_MIN = 1;

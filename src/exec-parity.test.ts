@@ -2,7 +2,7 @@ import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_COMMAND_TIMEOUT } from './constants.js';
-import { SandboxCommandError, SandboxError, SandboxTimeoutError } from './errors.js';
+import { SandboxCommandError, SandboxConnectionError, SandboxError, SandboxTimeoutError } from './errors.js';
 import { Sandbox, type ExecResult } from './sandbox.js';
 import {
   completeEvent as complete,
@@ -381,7 +381,7 @@ describe('SSE parser robustness', () => {
 
     const error = await sandbox.exec('x').catch((error: unknown) => error);
 
-    expect(error).toBeInstanceOf(SandboxError);
+    expect(error).toBeInstanceOf(SandboxConnectionError);
     expect((error as Error).message).toBe('Connection to sandbox lost: Error: wire cut');
     await new Promise((resolve) => setTimeout(resolve, 0));
 

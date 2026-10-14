@@ -1,5 +1,5 @@
 import { DEFAULT_COMMAND_TIMEOUT } from './constants.js';
-import { SandboxCommandError, SandboxError, SandboxTimeoutError } from './errors.js';
+import { SandboxCommandError, SandboxConnectionError, SandboxError, SandboxTimeoutError } from './errors.js';
 import { handleServerSentEvents } from './server-sent-event.js';
 import { TypedEventTarget } from './typed-event-target.js';
 import { assert } from './prelude.js';
@@ -249,7 +249,7 @@ class Deadline {
 
   /**
    * Streaming failures map to the SDK taxonomy: timeouts map, typed errors and
-   * caller aborts pass through, lost connections become SandboxError like Python.
+   * caller aborts pass through, lost connections become SandboxConnectionError.
    */
   mapStreamFailure(error: unknown, sandboxName: string): unknown {
     if (this.fired) {
@@ -260,7 +260,7 @@ class Deadline {
       return error;
     }
 
-    return new SandboxError(`Connection to sandbox lost: ${String(error)}`);
+    return new SandboxConnectionError(`Connection to sandbox lost: ${String(error)}`, { cause: error });
   }
 
   dispose(): void {

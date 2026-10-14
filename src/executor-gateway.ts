@@ -1,5 +1,11 @@
 import { DEFAULT_EXECUTOR_RETRIES, DEFAULT_EXECUTOR_RETRY_DELAY_MS, DEFAULT_HTTP_TIMEOUT } from './constants.js';
-import { SandboxError, SandboxRequestError, SandboxServiceError, SandboxTimeoutError } from './errors.js';
+import {
+  SandboxConnectionError,
+  SandboxError,
+  SandboxRequestError,
+  SandboxServiceError,
+  SandboxTimeoutError,
+} from './errors.js';
 import { wait } from './time.js';
 
 /** The low-level "authorize and send" primitive the gateway drives. */
@@ -59,7 +65,9 @@ export class ExecutorGateway {
         if (attempt >= DEFAULT_EXECUTOR_RETRIES) {
           throw error instanceof SandboxError
             ? error
-            : new SandboxError(`Request to sandbox executor failed: ${String(error)}`);
+            : new SandboxConnectionError(`Request to sandbox executor failed: ${String(error)}`, {
+                cause: error,
+              });
         }
 
         await wait(backoff, init.signal ?? undefined);

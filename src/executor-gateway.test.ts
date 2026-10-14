@@ -6,6 +6,7 @@ afterEach(() => {
 
 import { ExecutorGateway } from './executor-gateway.js';
 import {
+  SandboxConnectionError,
   SandboxError,
   SandboxRequestError,
   SandboxServiceError,
@@ -126,7 +127,7 @@ describe('ExecutorGateway.post', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     const error = await errorPromise;
 
-    expect(error).toBeInstanceOf(SandboxError);
+    expect(error).toBeInstanceOf(SandboxConnectionError);
     expect((error as Error).message).toContain('Request to sandbox executor failed');
   });
 

@@ -14,6 +14,7 @@ import {
   NoSandboxSecretError,
   PoolClaimError,
   SandboxCommandError,
+  SandboxConnectionError,
   SandboxDeploymentError,
   SandboxError,
   SandboxFileExistsError,
@@ -90,6 +91,24 @@ describe('error taxonomy parity with the Python SDK', () => {
   it('filesystem errors form a hierarchy', () => {
     expect(new SandboxFileNotFoundError('x')).toBeInstanceOf(SandboxFilesystemError);
     expect(new SandboxFileExistsError('x')).toBeInstanceOf(SandboxFilesystemError);
+  });
+
+  it('lost executor connections get a dedicated catchable type', () => {
+    expect(new SandboxConnectionError('x')).toBeInstanceOf(SandboxError);
+  });
+
+  it('errors report their class name instead of the generic Error', () => {
+    // SandboxTimeoutError keeps `name` as the sandbox it waited for.
+    const errors = [
+      new MissingApiTokenError(),
+      new SandboxFileNotFoundError('x'),
+      new SandboxConnectionError('x'),
+      new PoolClaimError('x'),
+    ];
+
+    for (const error of errors) {
+      expect(error.name).toBe(error.constructor.name);
+    }
   });
 });
 

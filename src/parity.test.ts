@@ -1175,6 +1175,25 @@ describe('executor success-field parity with the Python SDK', () => {
   });
 });
 
+describe('sandbox URL availability parity with the Python SDK', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('raises a typed SandboxError when the sandbox has no domain', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const api = (sandbox as unknown as { api: KoyebApi }).api;
+    // No deployment metadata and no app domain: no URL to connect to.
+    vi.spyOn(api, 'getService').mockResolvedValue({} as never);
+    vi.spyOn(api, 'getApp').mockResolvedValue({} as never);
+
+    const error = await sandbox.get_domain().catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxError);
+    expect((error as Error).message).toBe('Sandbox URL is not available (the sandbox may no longer exist)');
+  });
+});
+
 describe('expose_port best-effort unbind parity with the Python SDK', () => {
   afterEach(() => {
     vi.restoreAllMocks();

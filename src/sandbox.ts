@@ -522,7 +522,7 @@ export class Sandbox {
     const app = await this.api.getApp(this.app_id);
     const domain = app.domains?.[0];
 
-    assert(domain?.name);
+    assert(domain?.name, new SandboxError('Sandbox URL is not available (the sandbox may no longer exist)'));
 
     return domain.name;
   }

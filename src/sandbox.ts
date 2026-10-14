@@ -819,7 +819,10 @@ export class Sandbox {
     return this.runner.run(cmd, options);
   }
 
-  exec_stream(cmd: string, options: Pick<ExecOptions, 'cwd' | 'env' | 'signal'> = {}): SandboxExec {
+  exec_stream(
+    cmd: string,
+    options: Pick<ExecOptions, 'cwd' | 'env' | 'signal' | 'timeout'> = {},
+  ): SandboxExec {
     return this.runner.stream(cmd, options);
   }
 

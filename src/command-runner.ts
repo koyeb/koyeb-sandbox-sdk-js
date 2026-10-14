@@ -102,14 +102,27 @@ export class CommandRunner {
   }
 
   /** Raw SSE emitter: stdout/stderr chunks, the exit payload, then end. */
-  stream(cmd: string, { cwd, env, signal }: Pick<ExecOptions, 'cwd' | 'env' | 'signal'> = {}): SandboxExec {
+  stream(
+    cmd: string,
+    { cwd, env, signal, timeout = DEFAULT_COMMAND_TIMEOUT }: Pick<ExecOptions, 'cwd' | 'env' | 'signal' | 'timeout'> = {},
+  ): SandboxExec {
     const emitter = new EventTarget();
+    const deadline = new Deadline(timeout, signal);
 
     this.port
-      .raw('/run_streaming', { method: 'POST', signal }, { cmd, cwd, env })
-      .then((response) => response.body)
-      .then((body) => body && handleServerSentEvents(emitter, body))
-      .catch((error) => emitter.dispatchEvent(new MessageEvent('error', { data: error })));
+      .raw('/run_streaming', { method: 'POST', signal: deadline.signal }, { cmd, cwd, env })
+      .then((response) => {
+        // An empty body would leave consumers waiting for events forever.
+        if (!response.body) {
+          throw new SandboxError('Sandbox executor returned an empty command stream');
+        }
+
+        return handleServerSentEvents(emitter, response.body, () => deadline.arm());
+      })
+      .catch((error) =>
+        emitter.dispatchEvent(new MessageEvent('error', { data: deadline.mapStreamFailure(error, this.port.name) })),
+      )
+      .finally(() => deadline.dispose());
 
     return emitter;
   }

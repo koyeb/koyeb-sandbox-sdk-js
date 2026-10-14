@@ -342,6 +342,48 @@ describe('SSE parser robustness', () => {
     expect(result.stderr).toContain('Failed to parse event data');
   });
 
+  it('parses CRLF-delimited events, per the SSE format', async () => {
+    const encoder = new TextEncoder();
+    const sandbox = makeSandbox();
+    vi.spyOn(sandbox, 'fetch').mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(`event: output\r\ndata: ${JSON.stringify({ stream: 'stdout', data: 'hi' })}\r\n\r\n`),
+            );
+            controller.enqueue(
+              encoder.encode(`event: complete\r\ndata: ${JSON.stringify({ code: 0, error: false })}\r\n\r\n`),
+            );
+            controller.close();
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await sandbox.exec('x');
+
+    expect(result.stdout).toBe('hi');
+    expect(result.code).toBe(0);
+  });
+
+  it('joins multi-line data fields with newlines, per the SSE format', async () => {
+    const sandbox = makeSandbox();
+    // One JSON payload split across two data: lines.
+    vi.spyOn(sandbox, 'fetch').mockResolvedValue(
+      sseResponse([
+        `event: output\ndata: {"stream": "stdout",\ndata: "data": "hi"}\n\n`,
+        complete({ code: 0, error: false }),
+      ]),
+    );
+
+    const result = await sandbox.exec('x');
+
+    expect(result.stdout).toBe('hi');
+    expect(result.code).toBe(0);
+  });
+
   it('keeps multi-byte characters split across chunks intact', async () => {
     const payload = 'héllo→';
     const bytes = new TextEncoder().encode(

@@ -502,20 +502,25 @@ export class Sandbox {
   }
 
   async get_tcp_proxy_info(): Promise<[host: string, public_port: number] | undefined> {
-    const service = await this.api.getService(this.service_id);
+    // Readiness polls this: a control-plane blip means "not yet", not an error.
+    try {
+      const service = await this.api.getService(this.service_id);
 
-    if (isUndefined(service.active_deployment_id)) {
+      if (isUndefined(service.active_deployment_id)) {
+        return;
+      }
+
+      const deployment = await this.api.getDeployment(service.active_deployment_id);
+      const proxy_port = deployment.metadata?.proxy_ports?.find(({ port }) => port === 3031);
+
+      if (!proxy_port) {
+        return;
+      }
+
+      return [proxy_port.host!, proxy_port.public_port!];
+    } catch {
       return;
     }
-
-    const deployment = await this.api.getDeployment(service.active_deployment_id);
-    const proxy_port = deployment.metadata?.proxy_ports?.find(({ port }) => port === 3031);
-
-    if (!proxy_port) {
-      return;
-    }
-
-    return [proxy_port.host!, proxy_port.public_port!];
   }
 
   private async get_domain_from_app(): Promise<string> {

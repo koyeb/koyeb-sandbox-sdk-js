@@ -1175,6 +1175,31 @@ describe('executor success-field parity with the Python SDK', () => {
   });
 });
 
+describe('tcp proxy lookup parity with the Python SDK', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('tolerates transient API failures instead of raising', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const api = (sandbox as unknown as { api: KoyebApi }).api;
+    vi.spyOn(api, 'getService').mockRejectedValue(new SandboxApiError(500, { message: 'blip' }));
+
+    await expect(sandbox.get_tcp_proxy_info()).resolves.toBeUndefined();
+  });
+
+  it('still resolves the proxy host and port when present', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const api = (sandbox as unknown as { api: KoyebApi }).api;
+    vi.spyOn(api, 'getService').mockResolvedValue({ active_deployment_id: 'dep-1' } as never);
+    vi.spyOn(api, 'getDeployment').mockResolvedValue({
+      metadata: { proxy_ports: [{ port: 3031, host: 'proxy.example.org', public_port: 1234 }] },
+    } as never);
+
+    await expect(sandbox.get_tcp_proxy_info()).resolves.toEqual(['proxy.example.org', 1234]);
+  });
+});
+
 describe('sandbox URL availability parity with the Python SDK', () => {
   afterEach(() => {
     vi.restoreAllMocks();

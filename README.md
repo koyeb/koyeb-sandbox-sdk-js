@@ -366,6 +366,7 @@ The SDK exports the following error classes for granular handling. Every one of 
 - `SandboxRequestError` — executor non-OK responses (carries `status_code` + `body`)
 - `SandboxApiError` — non-2xx API responses (carries `status` + `body`)
 - `SandboxServiceError` — executor 5xx responses after the retry budget (extends `SandboxRequestError`)
+- `SandboxConnectionError` — the executor could not be reached at the network level (carries the original `cause`)
 - `SandboxCommandError` — a command exited non-zero while `raise_on_error` was opted in (carries the command `result`)
 - `SandboxDeploymentError` — the sandbox deployment reached a terminal error state
 - `EgressPolicyError`

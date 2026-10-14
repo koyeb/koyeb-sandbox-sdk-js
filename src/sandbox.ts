@@ -142,10 +142,10 @@ export class Sandbox {
     this.api = new KoyebApi(this.api_token, undefined, this.host);
     // Transport policy rides on this class's authorized fetch, so the seam
     // tests already mock stays the seam.
-    this.gateway = new ExecutorGateway((path, init, body) => this.fetch(path, init, body));
+    this.gateway = new ExecutorGateway((path, init, body) => this.fetch(path, init, body), { name: this.name });
     this.runner = new CommandRunner({
       name: this.name,
-      post: (path, init, body, hooks) => this.request(path, init, body, hooks),
+      post: (path, init, body, hooks, options) => this.request(path, init, body, hooks, options),
       raw: (path, init, body) => this.gateway.raw(path, init, body),
     });
   }
@@ -502,27 +502,32 @@ export class Sandbox {
   }
 
   async get_tcp_proxy_info(): Promise<[host: string, public_port: number] | undefined> {
-    const service = await this.api.getService(this.service_id);
+    // Readiness polls this: a control-plane blip means "not yet", not an error.
+    try {
+      const service = await this.api.getService(this.service_id);
 
-    if (isUndefined(service.active_deployment_id)) {
+      if (isUndefined(service.active_deployment_id)) {
+        return;
+      }
+
+      const deployment = await this.api.getDeployment(service.active_deployment_id);
+      const proxy_port = deployment.metadata?.proxy_ports?.find(({ port }) => port === 3031);
+
+      if (!proxy_port) {
+        return;
+      }
+
+      return [proxy_port.host!, proxy_port.public_port!];
+    } catch {
       return;
     }
-
-    const deployment = await this.api.getDeployment(service.active_deployment_id);
-    const proxy_port = deployment.metadata?.proxy_ports?.find(({ port }) => port === 3031);
-
-    if (!proxy_port) {
-      return;
-    }
-
-    return [proxy_port.host!, proxy_port.public_port!];
   }
 
   private async get_domain_from_app(): Promise<string> {
     const app = await this.api.getApp(this.app_id);
     const domain = app.domains?.[0];
 
-    assert(domain?.name);
+    assert(domain?.name, new SandboxError('Sandbox URL is not available (the sandbox may no longer exist)'));
 
     return domain.name;
   }
@@ -801,8 +806,14 @@ export class Sandbox {
     return fetch(`${conn.public_url}${path}`, init);
   }
 
-  async request(path: string, init: RequestInit, requestBody?: unknown, hooks?: { onAttempt?: () => void }) {
-    return this.gateway.post(path, init, requestBody, hooks);
+  async request(
+    path: string,
+    init: RequestInit,
+    requestBody?: unknown,
+    hooks?: { onAttempt?: () => void },
+    options?: { timeout?: number },
+  ) {
+    return this.gateway.post(path, init, requestBody, hooks, options);
   }
 
   get filesystem() {
@@ -813,7 +824,10 @@ export class Sandbox {
     return this.runner.run(cmd, options);
   }
 
-  exec_stream(cmd: string, options: Pick<ExecOptions, 'cwd' | 'env' | 'signal'> = {}): SandboxExec {
+  exec_stream(
+    cmd: string,
+    options: Pick<ExecOptions, 'cwd' | 'env' | 'signal' | 'timeout'> = {},
+  ): SandboxExec {
     return this.runner.stream(cmd, options);
   }
 
@@ -822,7 +836,10 @@ export class Sandbox {
 
     // Python parity: the pre-unbind is best-effort — a failure means nothing was bound yet.
     await this.unexpose_port().catch(() => {});
-    await this.request('/bind_port', { method: 'POST' }, { port: String(port) });
+    this.checkExecutorResponse(
+      await this.request('/bind_port', { method: 'POST' }, { port: String(port) }),
+      `expose port ${port}`,
+    );
 
     const domain = await this.get_domain();
 
@@ -837,16 +854,42 @@ export class Sandbox {
       assert(port >= PORT_MIN && port <= PORT_MAX, new InvalidPortError(port));
     }
 
-    await this.request('/unbind_port', { method: 'POST' }, { port: isDefined(port) ? String(port) : undefined });
+    const response = await this.request('/unbind_port', { method: 'POST' }, {
+      port: isDefined(port) ? String(port) : undefined,
+    });
+    this.checkExecutorResponse(response, 'unexpose port');
   }
 
   async launch_process(cmd: string, options?: { cwd?: string; env?: Record<string, string> }): Promise<string> {
     const response = await this.request('/start_process', { method: 'POST' }, { cmd, ...options });
+    this.checkExecutorResponse(response, 'launch process');
+
+    if (!response.id) {
+      throw new SandboxError('Failed to launch process: no process ID returned');
+    }
+
     return response.id;
   }
 
   async kill_process(processId: string): Promise<void> {
-    await this.request(`/kill_process`, { method: 'POST' }, { id: processId });
+    this.checkExecutorResponse(
+      await this.request(`/kill_process`, { method: 'POST' }, { id: processId }),
+      `kill process ${processId}`,
+    );
+  }
+
+  // The executor reports some failures as a 200 body carrying an error;
+  // Python surfaces those the same way as HTTP failures.
+  private checkExecutorResponse(response: unknown, operation: string): void {
+    if (!response || typeof response !== 'object') {
+      return;
+    }
+
+    const result = response as { error?: unknown; success?: unknown };
+
+    if (result.error || result.success === false) {
+      throw new SandboxError(`Failed to ${operation}: ${String(result.error ?? 'Unknown error')}`);
+    }
   }
 
   async list_processes(): Promise<SandboxProcess[]> {

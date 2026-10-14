@@ -2,7 +2,7 @@ import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_COMMAND_TIMEOUT } from './constants.js';
-import { SandboxCommandError, SandboxError, SandboxTimeoutError } from './errors.js';
+import { SandboxCommandError, SandboxConnectionError, SandboxError, SandboxTimeoutError } from './errors.js';
 import { Sandbox, type ExecResult } from './sandbox.js';
 import {
   completeEvent as complete,
@@ -267,12 +267,12 @@ describe('exec deadline parity', () => {
   it('forwards caller aborts with one in-flight listener and cleans it up', async () => {
     const sandbox = makeSandbox();
     const controller = new AbortController();
-    let release: (value: unknown) => void = () => {};
-    vi.spyOn(sandbox, 'request').mockImplementation(async () => {
-      await new Promise((resolve) => {
-        release = resolve;
+    vi.spyOn(sandbox, 'fetch').mockImplementation((_path, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        const abort = () => reject(new DOMException('This operation was aborted', 'AbortError'));
+        if (init.signal?.aborted) abort();
+        else init.signal?.addEventListener('abort', abort);
       });
-      return { stdout: '', stderr: '', code: 0 };
     });
 
     const pending = sandbox.exec('x', { stream: false, signal: controller.signal });
@@ -281,10 +281,10 @@ describe('exec deadline parity', () => {
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
 
     controller.abort();
-    release(undefined);
     const error = await pending.catch((error: unknown) => error);
 
     expect(error).not.toBeInstanceOf(SandboxTimeoutError);
+    expect((error as Error).message).toContain('aborted');
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
 });
@@ -342,6 +342,48 @@ describe('SSE parser robustness', () => {
     expect(result.stderr).toContain('Failed to parse event data');
   });
 
+  it('parses CRLF-delimited events, per the SSE format', async () => {
+    const encoder = new TextEncoder();
+    const sandbox = makeSandbox();
+    vi.spyOn(sandbox, 'fetch').mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(`event: output\r\ndata: ${JSON.stringify({ stream: 'stdout', data: 'hi' })}\r\n\r\n`),
+            );
+            controller.enqueue(
+              encoder.encode(`event: complete\r\ndata: ${JSON.stringify({ code: 0, error: false })}\r\n\r\n`),
+            );
+            controller.close();
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await sandbox.exec('x');
+
+    expect(result.stdout).toBe('hi');
+    expect(result.code).toBe(0);
+  });
+
+  it('joins multi-line data fields with newlines, per the SSE format', async () => {
+    const sandbox = makeSandbox();
+    // One JSON payload split across two data: lines.
+    vi.spyOn(sandbox, 'fetch').mockResolvedValue(
+      sseResponse([
+        `event: output\ndata: {"stream": "stdout",\ndata: "data": "hi"}\n\n`,
+        complete({ code: 0, error: false }),
+      ]),
+    );
+
+    const result = await sandbox.exec('x');
+
+    expect(result.stdout).toBe('hi');
+    expect(result.code).toBe(0);
+  });
+
   it('keeps multi-byte characters split across chunks intact', async () => {
     const payload = 'héllo→';
     const bytes = new TextEncoder().encode(
@@ -381,7 +423,7 @@ describe('SSE parser robustness', () => {
 
     const error = await sandbox.exec('x').catch((error: unknown) => error);
 
-    expect(error).toBeInstanceOf(SandboxError);
+    expect(error).toBeInstanceOf(SandboxConnectionError);
     expect((error as Error).message).toBe('Connection to sandbox lost: Error: wire cut');
     await new Promise((resolve) => setTimeout(resolve, 0));
 

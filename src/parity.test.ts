@@ -14,6 +14,7 @@ import {
   NoSandboxSecretError,
   PoolClaimError,
   SandboxCommandError,
+  SandboxConnectionError,
   SandboxDeploymentError,
   SandboxError,
   SandboxFileExistsError,
@@ -90,6 +91,24 @@ describe('error taxonomy parity with the Python SDK', () => {
   it('filesystem errors form a hierarchy', () => {
     expect(new SandboxFileNotFoundError('x')).toBeInstanceOf(SandboxFilesystemError);
     expect(new SandboxFileExistsError('x')).toBeInstanceOf(SandboxFilesystemError);
+  });
+
+  it('lost executor connections get a dedicated catchable type', () => {
+    expect(new SandboxConnectionError('x')).toBeInstanceOf(SandboxError);
+  });
+
+  it('errors report their class name instead of the generic Error', () => {
+    // SandboxTimeoutError keeps `name` as the sandbox it waited for.
+    const errors = [
+      new MissingApiTokenError(),
+      new SandboxFileNotFoundError('x'),
+      new SandboxConnectionError('x'),
+      new PoolClaimError('x'),
+    ];
+
+    for (const error of errors) {
+      expect(error.name).toBe(error.constructor.name);
+    }
   });
 });
 
@@ -182,6 +201,12 @@ describe('filesystem executor error mapping', () => {
       content: 'hello',
       encoding: 'utf-8',
     });
+  });
+
+  it('list_dir defaults to an empty list when the executor omits entries', async () => {
+    request.mockResolvedValue({});
+
+    await expect(sandbox.filesystem.list_dir('/data')).resolves.toEqual([]);
   });
 });
 
@@ -1075,6 +1100,122 @@ describe('readiness parity', () => {
     // With the 2s default interval this would take >= 2s; with 50ms it lands
     // well under a second.
     expect(elapsed).toBeLessThan(1_000);
+  });
+});
+
+describe('executor success-field parity with the Python SDK', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('expose_port rejects a 200 reply that carries an error', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'get_domain').mockResolvedValue('https://sbx.example.org');
+    const request = vi
+      .spyOn(sandbox, 'request')
+      .mockImplementation(async (_path: string, _init: RequestInit, body?: unknown) => {
+        // The pre-unbind is best-effort; only the bind carries the failure.
+        if ((body as { port?: string } | undefined)?.port === '8080') {
+          return { success: false, error: 'Port already bound', current_port: '8000' };
+        }
+        return {};
+      });
+
+    const error = await sandbox.expose_port(8080).catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxError);
+    expect((error as Error).message).toBe('Failed to expose port 8080: Port already bound');
+    expect(request).toHaveBeenCalled();
+  });
+
+  it('unexpose_port surfaces executor-side failures', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'request').mockResolvedValue({ success: false, error: 'port not bound' } as never);
+
+    const error = await sandbox.unexpose_port().catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxError);
+    expect((error as Error).message).toBe('Failed to unexpose port: port not bound');
+  });
+
+  it('kill_process surfaces executor-side failures', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'request').mockResolvedValue({ success: false, error: 'process not found' } as never);
+
+    const error = await sandbox.kill_process('p-1').catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxError);
+    expect((error as Error).message).toBe('Failed to kill process p-1: process not found');
+  });
+
+  it('launch_process rejects replies that carry an error or no id', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const request = vi.spyOn(sandbox, 'request');
+    request.mockResolvedValueOnce({ error: 'cannot spawn' } as never);
+    request.mockResolvedValueOnce({} as never);
+
+    const errored = await sandbox.launch_process('server').catch((error: unknown) => error);
+    expect((errored as Error).message).toBe('Failed to launch process: cannot spawn');
+
+    const noId = await sandbox.launch_process('server').catch((error: unknown) => error);
+    expect((noId as Error).message).toBe('Failed to launch process: no process ID returned');
+  });
+
+  it('successful port and process operations pass through', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'get_domain').mockResolvedValue('https://sbx.example.org');
+    vi.spyOn(sandbox, 'request').mockImplementation(async () => ({ success: true }) as never);
+
+    await expect(sandbox.expose_port(8080)).resolves.toMatchObject({ port: 8080 });
+    await expect(sandbox.unexpose_port()).resolves.toBeUndefined();
+    await expect(sandbox.kill_process('p-1')).resolves.toBeUndefined();
+
+    vi.spyOn(sandbox, 'request').mockResolvedValue({ id: 'p-9' } as never);
+    await expect(sandbox.launch_process('server')).resolves.toBe('p-9');
+  });
+});
+
+describe('tcp proxy lookup parity with the Python SDK', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('tolerates transient API failures instead of raising', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const api = (sandbox as unknown as { api: KoyebApi }).api;
+    vi.spyOn(api, 'getService').mockRejectedValue(new SandboxApiError(500, { message: 'blip' }));
+
+    await expect(sandbox.get_tcp_proxy_info()).resolves.toBeUndefined();
+  });
+
+  it('still resolves the proxy host and port when present', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const api = (sandbox as unknown as { api: KoyebApi }).api;
+    vi.spyOn(api, 'getService').mockResolvedValue({ active_deployment_id: 'dep-1' } as never);
+    vi.spyOn(api, 'getDeployment').mockResolvedValue({
+      metadata: { proxy_ports: [{ port: 3031, host: 'proxy.example.org', public_port: 1234 }] },
+    } as never);
+
+    await expect(sandbox.get_tcp_proxy_info()).resolves.toEqual(['proxy.example.org', 1234]);
+  });
+});
+
+describe('sandbox URL availability parity with the Python SDK', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('raises a typed SandboxError when the sandbox has no domain', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const api = (sandbox as unknown as { api: KoyebApi }).api;
+    // No deployment metadata and no app domain: no URL to connect to.
+    vi.spyOn(api, 'getService').mockResolvedValue({} as never);
+    vi.spyOn(api, 'getApp').mockResolvedValue({} as never);
+
+    const error = await sandbox.get_domain().catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxError);
+    expect((error as Error).message).toBe('Sandbox URL is not available (the sandbox may no longer exist)');
   });
 });
 

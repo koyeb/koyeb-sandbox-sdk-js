@@ -5,7 +5,22 @@ afterEach(() => {
 });
 
 import { ExecutorGateway } from './executor-gateway.js';
-import { SandboxError, SandboxRequestError, SandboxServiceError } from './errors.js';
+import {
+  SandboxConnectionError,
+  SandboxError,
+  SandboxRequestError,
+  SandboxServiceError,
+  SandboxTimeoutError,
+} from './errors.js';
+
+/** A send seam that hangs until its request signal aborts, like undici. */
+function hangingSend() {
+  return vi.fn((_path: string, init: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    }),
+  );
+}
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -23,7 +38,52 @@ describe('ExecutorGateway.post', () => {
 
     expect(body).toEqual({ ok: true });
     expect(send).toHaveBeenCalledTimes(2);
-    expect(send.mock.calls[0]).toEqual(['/run', { method: 'POST' }, { cmd: 'ls' }]);
+    expect(send.mock.calls[0]).toMatchObject(['/run', { method: 'POST', signal: expect.any(AbortSignal) }, { cmd: 'ls' }]);
+  });
+
+  it('aborts a hung request at the default 30s HTTP timeout', async () => {
+    vi.useFakeTimers();
+    const send = hangingSend();
+    const gateway = new ExecutorGateway(send, { name: 'sbx' });
+
+    const pending = gateway.post('/run', { method: 'POST' }, { cmd: 'ls' });
+    const errorPromise = pending.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const error = await errorPromise;
+
+    expect(error).toBeInstanceOf(SandboxTimeoutError);
+    expect((error as Error).message).toBe('Request timed out after 30s');
+  });
+
+  it('honors a per-call timeout override', async () => {
+    vi.useFakeTimers();
+    const send = hangingSend();
+    const gateway = new ExecutorGateway(send, { name: 'sbx' });
+
+    const pending = gateway.post('/run', { method: 'POST' }, undefined, undefined, { timeout: 1 });
+    const errorPromise = pending.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const error = await errorPromise;
+
+    expect(error).toBeInstanceOf(SandboxTimeoutError);
+    expect((error as SandboxTimeoutError).timeout).toBe(1);
+  });
+
+  it('re-arms the request timeout on every retry attempt', async () => {
+    vi.useFakeTimers();
+    // Attempt 1 answers 503 at once; attempt 2 hangs until its own budget ends.
+    const send = hangingSend();
+    send.mockResolvedValueOnce(new Response('down', { status: 503 }));
+    const gateway = new ExecutorGateway(send, { name: 'sbx' });
+
+    const pending = gateway.post('/run', { method: 'POST' });
+    const errorPromise = pending.catch((error: unknown) => error);
+    // Backoff 1s, then attempt 2's 30s budget: both inside 32s.
+    await vi.advanceTimersByTimeAsync(32_000);
+    const error = await errorPromise;
+
+    expect(error).toBeInstanceOf(SandboxTimeoutError);
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it('surfaces persistent 5xx as SandboxServiceError', async () => {
@@ -67,7 +127,7 @@ describe('ExecutorGateway.post', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     const error = await errorPromise;
 
-    expect(error).toBeInstanceOf(SandboxError);
+    expect(error).toBeInstanceOf(SandboxConnectionError);
     expect((error as Error).message).toContain('Request to sandbox executor failed');
   });
 

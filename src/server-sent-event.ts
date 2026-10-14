@@ -56,9 +56,16 @@ export function handleServerSentEvents(
   function handleText(text: string) {
     buffer += text;
 
-    while (buffer.includes('\n\n')) {
-      const [event] = buffer.split('\n\n', 1);
-      buffer = buffer.slice(event.length + 2);
+    for (;;) {
+      // The SSE format allows both LF and CRLF line endings.
+      const separator = /\r?\n\r?\n/.exec(buffer);
+
+      if (!separator) {
+        return;
+      }
+
+      const event = buffer.slice(0, separator.index);
+      buffer = buffer.slice(separator.index + separator[0].length);
       handleEvent(parseEvent(event));
     }
   }
@@ -88,12 +95,24 @@ export function handleServerSentEvents(
 }
 
 function parseEvent(input: string): SseEvent {
-  const lines = input.split('\n');
-  const event: Partial<Record<string, string>> = {};
+  const event: Partial<{ event: string; data: string }> = {};
+  const data: string[] = [];
 
-  for (const line of lines) {
-    const [key] = line.split(':', 1);
-    event[key] = line.slice(key.length + 1).trim();
+  for (const line of input.split(/\r?\n/)) {
+    const separator = line.indexOf(':');
+    const key = separator === -1 ? line : line.slice(0, separator);
+    const value = separator === -1 ? '' : line.slice(separator + 1).trimStart();
+
+    if (key === 'data') {
+      data.push(value);
+    } else if (key === 'event') {
+      event.event = value;
+    }
+  }
+
+  // Multiple data lines join with newlines, per the SSE format.
+  if (data.length > 0) {
+    event.data = data.join('\n');
   }
 
   return event;

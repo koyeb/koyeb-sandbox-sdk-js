@@ -54,7 +54,7 @@ export class SandboxFilesystem {
   async list_dir(path = '.'): Promise<string[]> {
     const result = await this.sandbox.request('/list_dir', { method: 'POST' }, { path });
     checkExecutorError(result, path, 'list_dir');
-    return result.entries;
+    return result.entries ?? [];
   }
 
   async delete_dir(path: string): Promise<void> {

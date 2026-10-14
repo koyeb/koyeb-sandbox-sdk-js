@@ -1,5 +1,5 @@
 import { DEFAULT_COMMAND_TIMEOUT } from './constants.js';
-import { SandboxCommandError, SandboxError, SandboxTimeoutError } from './errors.js';
+import { SandboxCommandError, SandboxConnectionError, SandboxError, SandboxTimeoutError } from './errors.js';
 import { handleServerSentEvents } from './server-sent-event.js';
 import { TypedEventTarget } from './typed-event-target.js';
 import { assert } from './prelude.js';
@@ -53,8 +53,14 @@ export type ExecOptions = {
 /** The two transport calls the runner needs, injected so tests fake the seam directly. */
 export type CommandPort = {
   readonly name: string;
-  /** Retrying POST with body parsing and error mapping (Sandbox.request). */
-  post: (path: string, init: RequestInit, body?: unknown, hooks?: { onAttempt?: () => void }) => Promise<any>;
+  /** Retrying POST with body parsing, error mapping, and a request timeout. */
+  post: (
+    path: string,
+    init: RequestInit,
+    body?: unknown,
+    hooks?: { onAttempt?: () => void },
+    options?: { timeout?: number },
+  ) => Promise<any>;
   /** Single authorized request with non-OK mapping (ExecutorGateway.raw). */
   raw: (path: string, init: RequestInit, body?: unknown) => Promise<Response>;
 };
@@ -96,14 +102,27 @@ export class CommandRunner {
   }
 
   /** Raw SSE emitter: stdout/stderr chunks, the exit payload, then end. */
-  stream(cmd: string, { cwd, env, signal }: Pick<ExecOptions, 'cwd' | 'env' | 'signal'> = {}): SandboxExec {
+  stream(
+    cmd: string,
+    { cwd, env, signal, timeout = DEFAULT_COMMAND_TIMEOUT }: Pick<ExecOptions, 'cwd' | 'env' | 'signal' | 'timeout'> = {},
+  ): SandboxExec {
     const emitter = new EventTarget();
+    const deadline = new Deadline(timeout, signal);
 
     this.port
-      .raw('/run_streaming', { method: 'POST', signal }, { cmd, cwd, env })
-      .then((response) => response.body)
-      .then((body) => body && handleServerSentEvents(emitter, body))
-      .catch((error) => emitter.dispatchEvent(new MessageEvent('error', { data: error })));
+      .raw('/run_streaming', { method: 'POST', signal: deadline.signal }, { cmd, cwd, env })
+      .then((response) => {
+        // An empty body would leave consumers waiting for events forever.
+        if (!response.body) {
+          throw new SandboxError('Sandbox executor returned an empty command stream');
+        }
+
+        return handleServerSentEvents(emitter, response.body, () => deadline.arm());
+      })
+      .catch((error) =>
+        emitter.dispatchEvent(new MessageEvent('error', { data: deadline.mapStreamFailure(error, this.port.name) })),
+      )
+      .finally(() => deadline.dispose());
 
     return emitter;
   }
@@ -113,22 +132,17 @@ export class CommandRunner {
     cmd: string,
     { cwd, env, timeout, signal }: ExecRouteOptions,
   ): Promise<ExecRouteResult> {
-    const deadline = new Deadline(timeout, signal);
+    // The gateway owns the per-attempt request budget (Sandbox.request).
+    const reply = await this.port.post(
+      '/run',
+      { method: 'POST', signal },
+      { cmd, cwd, env },
+      undefined,
+      { timeout },
+    );
 
-    try {
-      const reply = await this.port.post(
-        '/run',
-        { method: 'POST', signal: deadline.signal },
-        { cmd, cwd, env },
-        { onAttempt: () => deadline.arm() },
-      );
-      // Normalize like Python's response.get(...) so partial replies type-check.
-      return { stdout: reply?.stdout ?? '', stderr: reply?.stderr ?? '', code: reply?.code ?? 0 };
-    } catch (error) {
-      throw deadline.mapFailure(error, this.port.name);
-    } finally {
-      deadline.dispose();
-    }
+    // Normalize like Python's response.get(...) so partial replies type-check.
+    return { stdout: reply?.stdout ?? '', stderr: reply?.stderr ?? '', code: reply?.code ?? 0 };
   }
 
   /** Streaming route: reassembles the SSE events into a command result, like Python's exec. */
@@ -248,7 +262,7 @@ class Deadline {
 
   /**
    * Streaming failures map to the SDK taxonomy: timeouts map, typed errors and
-   * caller aborts pass through, lost connections become SandboxError like Python.
+   * caller aborts pass through, lost connections become SandboxConnectionError.
    */
   mapStreamFailure(error: unknown, sandboxName: string): unknown {
     if (this.fired) {
@@ -259,7 +273,7 @@ class Deadline {
       return error;
     }
 
-    return new SandboxError(`Connection to sandbox lost: ${String(error)}`);
+    return new SandboxConnectionError(`Connection to sandbox lost: ${String(error)}`, { cause: error });
   }
 
   dispose(): void {

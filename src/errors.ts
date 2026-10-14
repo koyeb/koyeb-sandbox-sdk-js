@@ -5,7 +5,17 @@ import { PORT_MAX, PORT_MIN } from './constants.js';
  * Base class for every error raised by this SDK, mirroring the Python SDK's
  * `SandboxError` so callers can catch SDK failures with a single type.
  */
-export class SandboxError extends Error {}
+export class SandboxError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    // Subclasses report their own class name; SandboxTimeoutError overrides
+    // `name` with the sandbox it waited for.
+    this.name = new.target.name;
+  }
+}
+
+/** The executor could not be reached at the network level. */
+export class SandboxConnectionError extends SandboxError {}
 
 export class MissingApiTokenError extends SandboxError {
   constructor() {

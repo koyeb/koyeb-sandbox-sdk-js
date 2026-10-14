@@ -820,7 +820,8 @@ export class Sandbox {
   async expose_port(port: number): Promise<{ port: number; exposed_at: string }> {
     assert(port >= PORT_MIN && port <= PORT_MAX, new InvalidPortError(port));
 
-    await this.unexpose_port();
+    // Python parity: the pre-unbind is best-effort — a failure means nothing was bound yet.
+    await this.unexpose_port().catch(() => {});
     await this.request('/bind_port', { method: 'POST' }, { port: String(port) });
 
     const domain = await this.get_domain();
@@ -867,8 +868,15 @@ export class Sandbox {
 
     for (const process of await this.list_processes()) {
       if (process.status === 'running') {
-        await this.kill_process(process.id);
-        count++;
+        try {
+          await this.kill_process(process.id);
+          count++;
+        } catch (error) {
+          // Python parity: a failed kill must not stop the remaining ones.
+          if (!(error instanceof SandboxError)) {
+            throw error;
+          }
+        }
       }
     }
 

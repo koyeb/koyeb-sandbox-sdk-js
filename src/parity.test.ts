@@ -1097,6 +1097,78 @@ describe('readiness parity', () => {
   });
 });
 
+describe('executor success-field parity with the Python SDK', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('expose_port rejects a 200 reply that carries an error', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'get_domain').mockResolvedValue('https://sbx.example.org');
+    const request = vi
+      .spyOn(sandbox, 'request')
+      .mockImplementation(async (_path: string, _init: RequestInit, body?: unknown) => {
+        // The pre-unbind is best-effort; only the bind carries the failure.
+        if ((body as { port?: string } | undefined)?.port === '8080') {
+          return { success: false, error: 'Port already bound', current_port: '8000' };
+        }
+        return {};
+      });
+
+    const error = await sandbox.expose_port(8080).catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxError);
+    expect((error as Error).message).toBe('Failed to expose port 8080: Port already bound');
+    expect(request).toHaveBeenCalled();
+  });
+
+  it('unexpose_port surfaces executor-side failures', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'request').mockResolvedValue({ success: false, error: 'port not bound' } as never);
+
+    const error = await sandbox.unexpose_port().catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxError);
+    expect((error as Error).message).toBe('Failed to unexpose port: port not bound');
+  });
+
+  it('kill_process surfaces executor-side failures', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'request').mockResolvedValue({ success: false, error: 'process not found' } as never);
+
+    const error = await sandbox.kill_process('p-1').catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxError);
+    expect((error as Error).message).toBe('Failed to kill process p-1: process not found');
+  });
+
+  it('launch_process rejects replies that carry an error or no id', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const request = vi.spyOn(sandbox, 'request');
+    request.mockResolvedValueOnce({ error: 'cannot spawn' } as never);
+    request.mockResolvedValueOnce({} as never);
+
+    const errored = await sandbox.launch_process('server').catch((error: unknown) => error);
+    expect((errored as Error).message).toBe('Failed to launch process: cannot spawn');
+
+    const noId = await sandbox.launch_process('server').catch((error: unknown) => error);
+    expect((noId as Error).message).toBe('Failed to launch process: no process ID returned');
+  });
+
+  it('successful port and process operations pass through', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'get_domain').mockResolvedValue('https://sbx.example.org');
+    vi.spyOn(sandbox, 'request').mockImplementation(async () => ({ success: true }) as never);
+
+    await expect(sandbox.expose_port(8080)).resolves.toMatchObject({ port: 8080 });
+    await expect(sandbox.unexpose_port()).resolves.toBeUndefined();
+    await expect(sandbox.kill_process('p-1')).resolves.toBeUndefined();
+
+    vi.spyOn(sandbox, 'request').mockResolvedValue({ id: 'p-9' } as never);
+    await expect(sandbox.launch_process('server')).resolves.toBe('p-9');
+  });
+});
+
 describe('expose_port best-effort unbind parity with the Python SDK', () => {
   afterEach(() => {
     vi.restoreAllMocks();

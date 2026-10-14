@@ -828,7 +828,10 @@ export class Sandbox {
 
     // Python parity: the pre-unbind is best-effort — a failure means nothing was bound yet.
     await this.unexpose_port().catch(() => {});
-    await this.request('/bind_port', { method: 'POST' }, { port: String(port) });
+    this.checkExecutorResponse(
+      await this.request('/bind_port', { method: 'POST' }, { port: String(port) }),
+      `expose port ${port}`,
+    );
 
     const domain = await this.get_domain();
 
@@ -843,16 +846,42 @@ export class Sandbox {
       assert(port >= PORT_MIN && port <= PORT_MAX, new InvalidPortError(port));
     }
 
-    await this.request('/unbind_port', { method: 'POST' }, { port: isDefined(port) ? String(port) : undefined });
+    const response = await this.request('/unbind_port', { method: 'POST' }, {
+      port: isDefined(port) ? String(port) : undefined,
+    });
+    this.checkExecutorResponse(response, 'unexpose port');
   }
 
   async launch_process(cmd: string, options?: { cwd?: string; env?: Record<string, string> }): Promise<string> {
     const response = await this.request('/start_process', { method: 'POST' }, { cmd, ...options });
+    this.checkExecutorResponse(response, 'launch process');
+
+    if (!response.id) {
+      throw new SandboxError('Failed to launch process: no process ID returned');
+    }
+
     return response.id;
   }
 
   async kill_process(processId: string): Promise<void> {
-    await this.request(`/kill_process`, { method: 'POST' }, { id: processId });
+    this.checkExecutorResponse(
+      await this.request(`/kill_process`, { method: 'POST' }, { id: processId }),
+      `kill process ${processId}`,
+    );
+  }
+
+  // The executor reports some failures as a 200 body carrying an error;
+  // Python surfaces those the same way as HTTP failures.
+  private checkExecutorResponse(response: unknown, operation: string): void {
+    if (!response || typeof response !== 'object') {
+      return;
+    }
+
+    const result = response as { error?: unknown; success?: unknown };
+
+    if (result.error || result.success === false) {
+      throw new SandboxError(`Failed to ${operation}: ${String(result.error ?? 'Unknown error')}`);
+    }
   }
 
   async list_processes(): Promise<SandboxProcess[]> {

@@ -202,6 +202,12 @@ describe('filesystem executor error mapping', () => {
       encoding: 'utf-8',
     });
   });
+
+  it('list_dir defaults to an empty list when the executor omits entries', async () => {
+    request.mockResolvedValue({});
+
+    await expect(sandbox.filesystem.list_dir('/data')).resolves.toEqual([]);
+  });
 });
 
 describe('file transfer direction parity with the Python SDK and CLI', () => {

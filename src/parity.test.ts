@@ -250,6 +250,16 @@ describe('buildDefinition parity options', () => {
     expect(definition.env?.[0]).toEqual({ key: 'SANDBOX_SECRET', value: 'given-secret' });
   });
 
+  it('rejects an invalid exposed_port_protocol like Python _validate_port_protocol', () => {
+    expect(() => buildDefinition({ exposed_port_protocol: 'ftp' as never })).toThrow(
+      "Invalid protocol 'ftp'. Must be one of ('http', 'http2')",
+    );
+
+    // Both valid protocols pass the runtime check, not just the TypeScript type.
+    expect(() => buildDefinition({ exposed_port_protocol: 'http2' })).not.toThrow();
+    expect(() => buildDefinition({ exposed_port_protocol: 'http' })).not.toThrow();
+  });
+
   it('uses the deep sleep override when light sleep is enabled', () => {
     const { definition } = buildDefinition({
       name: 'sbx',
@@ -478,6 +488,16 @@ describe('create() parity with the Python SDK', () => {
     vi.restoreAllMocks();
   });
 
+  it('fails fast on an invalid exposed_port_protocol, before any API call', async () => {
+    const { calls } = stubControlPlane({});
+
+    await expect(
+      Sandbox.create({ wait_ready: false, api_token: 'token', exposed_port_protocol: 'ftp' as never }),
+    ).rejects.toThrow("Invalid protocol 'ftp'. Must be one of ('http', 'http2')");
+
+    expect(calls).toHaveLength(0);
+  });
+
   it('does not pre-flight against a hardcoded foreign app', async () => {
     const { calls } = stubControlPlane({});
 
@@ -599,6 +619,63 @@ describe('list() parity with the Python SDK', () => {
     vi.stubEnv('KOYEB_API_TOKEN', '');
 
     await expect(Sandbox.list()).rejects.toBeInstanceOf(MissingApiTokenError);
+  });
+});
+
+describe('process listings parity with the Python SDK', () => {
+  it('exposes ProcessInfo fields with a numeric pid or undefined', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const request = vi.spyOn(sandbox, 'request').mockResolvedValue({
+      processes: [
+        {
+          id: 'p-1',
+          command: 'python server.py',
+          status: 'running',
+          pid: 4242,
+          started_at: '2026-10-13T10:00:00Z',
+        },
+        {
+          id: 'p-2',
+          command: 'echo hi',
+          status: 'completed',
+          pid: null,
+          exit_code: 0,
+          started_at: '2026-10-13T10:00:00Z',
+          completed_at: '2026-10-13T10:00:01Z',
+        },
+      ],
+    } as never);
+
+    const processes = await sandbox.list_processes();
+
+    expect(request.mock.calls[0][0]).toBe('/list_processes');
+    // A running process: numeric pid, no exit/completion timestamps.
+    expect(processes[0]).toEqual({
+      id: 'p-1',
+      command: 'python server.py',
+      status: 'running',
+      pid: 4242,
+      exit_code: undefined,
+      started_at: '2026-10-13T10:00:00Z',
+      completed_at: undefined,
+    });
+    // A completed process: pid reads as undefined, not null, like an honest optional.
+    expect(processes[1]).toEqual({
+      id: 'p-2',
+      command: 'echo hi',
+      status: 'completed',
+      pid: undefined,
+      exit_code: 0,
+      started_at: '2026-10-13T10:00:00Z',
+      completed_at: '2026-10-13T10:00:01Z',
+    });
+  });
+
+  it('tolerates a missing processes array like Python response.get default', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    vi.spyOn(sandbox, 'request').mockResolvedValue({} as never);
+
+    await expect(sandbox.list_processes()).resolves.toEqual([]);
   });
 });
 

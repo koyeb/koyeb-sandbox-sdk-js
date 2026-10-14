@@ -119,7 +119,13 @@ export class SandboxApiError extends SandboxError {
 /** A command exited non-zero while `raise_on_error` was opted in (Python parity). */
 export class SandboxCommandError extends SandboxError {
   constructor(
-    public readonly result: { command: string; stdout: string; stderr: string; code: number },
+    public readonly result: {
+      command: string;
+      stdout: string;
+      stderr: string;
+      code: number;
+      duration?: number;
+    },
   ) {
     super(`Command '${result.command}' failed with exit code ${result.code}: ${result.stderr || result.stdout}`);
   }

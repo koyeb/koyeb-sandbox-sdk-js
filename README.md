@@ -227,7 +227,7 @@ await pool.delete();
 | `is_healthy()`                                           | Performs a `/health` check against the sandbox URL.                                                                                                                                                                                                                                                     |
 | `get_sandbox_url()`                                      | Returns the HTTPS URL (`https://<domain>/koyeb-sandbox`).                                                                                                                                                                                                                                               |
 | `get_tcp_proxy_info()`                                   | Returns `[host, publicPort]` once the TCP proxy is ready, otherwise `undefined`.                                                                                                                                                                                                                        |
-| `get_domain()`                                           | Fetches and caches the sandbox domain metadata.                                                                                                                                                                                                                                                         |
+| `get_domain()`                                           | Fetches and caches the sandbox's public URL, protocol included (`https://…`). See [Python SDK parity](#python-sdk-parity) for the known divergence with the Python SDK.                                                                                                                                   |
 | `update_lifecycle()`                                     | Change the auto deletion properties.                                                                                                                                                                                                                                                                    |
 | `update_network_policy(values?)`                         | Update the egress policy (block, allowlist, or reset). Triggers a redeployment.                                                                                                                                                                                                                         |
 | `delete()`                                               | Tears down the underlying service.                                                                                                                                                                                                                                                                      |
@@ -236,7 +236,7 @@ await pool.delete();
 
 | Method                       | Description                                                                                            |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `exec(cmd, options?)`        | Runs a command and resolves with `{ stdout, stderr, code }`.                                                                           |
+| `exec(cmd, options?)`        | Runs a command and resolves with `{ stdout, stderr, code, command, duration }` — `duration` is the wall-clock runtime in seconds.                                      |
 | `exec_stream(cmd, options?)` | Streams command output using Server-Sent Events. Emits `stdout`, `stderr`, `exit`, and `end`.          |
 
 `exec` options: `cwd`, `env`, `timeout` (seconds, default `30`), `on_stdout`/`on_stderr` (streaming callbacks; when set, output is no longer buffered), `stream` (default `true` consumes Server-Sent Events, `false` buffers server-side), `raise_on_error` (default `false`; when `true`, a non-zero exit raises `SandboxCommandError`), and `signal` (`AbortSignal`).
@@ -278,7 +278,7 @@ For callback-based streaming without event listeners, `exec` accepts `on_stdout`
 | ------------------------------- | ---------------------------------------------------------- |
 | `launch_process(cmd, options?)` | Starts a long-lived background process and returns its ID. |
 | `kill_process(processId)`       | Stops a process started with `launch_process`.             |
-| `list_processes()`              | Lists processes with their status.                         |
+| `list_processes()`              | Lists processes: `id`, `command`, `status`, `pid` (numeric, while running), `exit_code`, `started_at`, `completed_at`. |
 | `kill_all_processes()`          | Stops every running sandbox process and returns the count. |
 
 ## Filesystem Helpers
@@ -373,6 +373,22 @@ The SDK exports the following error classes for granular handling. Every one of 
 - `ServiceTerminalStateError`
 - `ServicePoolError`
 - `SandboxFilesystemError` (+ `SandboxFileNotFoundError`, `SandboxFileExistsError`)
+
+## Python SDK Parity
+
+This SDK tracks the [Python SDK](https://github.com/koyeb/koyeb-python-sdk) surface; known shape
+and behavior differences are listed below. Exec results carry `command` and `duration`
+(wall-clock seconds) on both the buffered and streaming routes; process listings expose
+`exit_code`, `started_at`, and `completed_at` with a numeric `pid` while running; and
+`exposed_port_protocol` is validated at create time (`http` or `http2`), not just by the
+TypeScript type.
+
+### Known divergences
+
+| API            | JavaScript                                          | Python                                                       | Status                                                                                                       |
+| -------------- | --------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `get_domain()` | Full URL including protocol: `https://<domain>/…`  | Bare domain without protocol: `<domain>/…`                  | Documented divergence — kept as-is; aligning would be a breaking change for callers relying on the full URL. |
+| `exec()` result | Exit status is `code`; no `status`/`args` fields    | `CommandResult` spells it `exit_code` and adds `status`, `args` | Documented divergence — kept as-is; `SandboxCommandError.exit_code` exposes the Python spelling on errors.    |
 
 ## Contributing
 

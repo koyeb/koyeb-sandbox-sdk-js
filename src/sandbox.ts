@@ -91,10 +91,28 @@ export type SandboxProcess = {
   id: string;
   command: string;
   status: SandboxProcessStatus;
-  pid: string;
+  /** OS process id, only while running (Python: ProcessInfo.pid). */
+  pid?: number;
+  /** Exit code, only once completed (Python: ProcessInfo.exit_code). */
+  exit_code?: number;
+  /** ISO 8601 timestamp of the start (Python: ProcessInfo.started_at). */
+  started_at?: string;
+  /** ISO 8601 timestamp of the completion, when applicable (Python: ProcessInfo.completed_at). */
+  completed_at?: string;
 };
 
 export type SandboxProcessStatus = 'running' | 'completed' | 'failed' | 'killed';
+
+/** A process as the executor sends it: optional fields may be absent or null. */
+type RawSandboxProcess = {
+  id: string;
+  command: string;
+  status: SandboxProcessStatus;
+  pid?: number | null;
+  exit_code?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
 
 type ConnectionInfo = {
   public_url: string;
@@ -832,7 +850,16 @@ export class Sandbox {
 
   async list_processes(): Promise<SandboxProcess[]> {
     const response = await this.request('/list_processes', { method: 'GET' });
-    return response.processes;
+    // Python maps raw entries into ProcessInfo; normalize so null reads as undefined.
+    const processes: RawSandboxProcess[] = response.processes ?? [];
+
+    return processes.map(({ pid, exit_code, started_at, completed_at, ...core }) => ({
+      ...core,
+      pid: pid ?? undefined,
+      exit_code: exit_code ?? undefined,
+      started_at: started_at ?? undefined,
+      completed_at: completed_at ?? undefined,
+    }));
   }
 
   async kill_all_processes(): Promise<number> {

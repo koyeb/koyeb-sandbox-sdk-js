@@ -334,7 +334,7 @@ const other = await Sandbox.create({ snapshot: 'my-snapshot', name: 'sbx' });
 ```
 
 - `sandbox.snapshot(name, options?)` — snapshot the first running instance; waits for availability by default (`snapshot_type: 'FULL'` captures full state).
-- `Snapshot.get(id)` / `Snapshot.list({ type, status, name, limit, offset })` — fetch snapshots.
+- `Snapshot.get(id)` / `Snapshot.list({ type, status, name, service_id, limit, offset })` — fetch snapshots; `service_id` filters the returned page client-side (the API has no such query param).
 - `snapshot.refresh()` / `snapshot.wait_available(timeout?, pollInterval?)` / `snapshot.delete()`.
 - `snapshot.spawn(name?, options?)` — boot a new sandbox from the snapshot.
 - `Sandbox.create({ snapshot, ... })` — create with `instance_snapshot_id`; a `FULL` snapshot omits the definition (the API infers it).

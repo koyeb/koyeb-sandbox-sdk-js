@@ -221,7 +221,10 @@ describe('Sandbox.wait_ready', () => {
     return new Sandbox('app-1', 'svc-1', 'sb', 'secret-1', 'token');
   }
 
-  it('polls with backoff from 0.1 s doubling up to 0.5 s', async () => {
+  // Polls at 0, 100, ..., 10000 ms: every 0.1 s for the first 10 s.
+  const fastWindowPolls = Array.from({ length: 101 }, (_, i) => i * 100);
+
+  async function deploymentPolls(pollInterval: number | undefined, count: number, advanceMs: number) {
     vi.useFakeTimers({ toFake: ['setTimeout', 'Date'] });
     const polls: number[] = [];
     const start = Date.now();
@@ -229,17 +232,35 @@ describe('Sandbox.wait_ready', () => {
       'GET /v1/services/svc-1': [jsonResponse({ service: service() })],
       'GET /v1/deployments/dep-1': () => {
         polls.push(Date.now() - start);
-        return jsonResponse({ deployment: deployment(polls.length < 7 ? 'STARTING' : 'HEALTHY') });
+        return jsonResponse({ deployment: deployment(polls.length < count ? 'STARTING' : 'HEALTHY') });
       },
       'GET /koyeb-sandbox/health': [jsonResponse({ status: 'ok' })],
     });
     vi.stubGlobal('fetch', fetch);
 
-    const pending = handle().wait_ready();
-    await vi.advanceTimersByTimeAsync(5_000);
+    const pending = handle().wait_ready(undefined, pollInterval);
+    await vi.advanceTimersByTimeAsync(advanceMs);
 
     await expect(pending).resolves.toBe(true);
-    expect(polls).toEqual([0, 100, 300, 700, 1200, 1700, 2200]);
+    return polls;
+  }
+
+  it('polls every 0.1 s for the first 10 s, then doubles up to 0.5 s', async () => {
+    const polls = await deploymentPolls(undefined, 105, 12_000);
+
+    expect(polls).toEqual([...fastWindowPolls, 10_200, 10_600, 11_100, 11_600]);
+  });
+
+  it('caps the backoff after the first 10 s at an explicit poll interval', async () => {
+    const polls = await deploymentPolls(2, 106, 16_000);
+
+    expect(polls).toEqual([...fastWindowPolls, 10_200, 10_600, 11_400, 13_000, 15_000]);
+  });
+
+  it('keeps a poll interval below 0.1 s', async () => {
+    const polls = await deploymentPolls(0.05, 4, 1_000);
+
+    expect(polls).toEqual([0, 50, 100, 150]);
   });
 
   it('retries /health on a network error or a non-2xx reply, at the same backoff', async () => {

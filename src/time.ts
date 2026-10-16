@@ -35,6 +35,7 @@ export async function waitFor(
  * Phase-latching wait (Python parity): polls the first phase until it first
  * succeeds, then the next, advancing within the same poll — only failures
  * sleep. The final phase completing resolves true; anything else times out.
+ * During the first `fastWindow` seconds the delay stays at `startInterval`.
  */
 export async function waitForPhased(
   phases: Array<() => boolean | Promise<boolean>>,
@@ -42,6 +43,7 @@ export async function waitForPhased(
   interval: number,
   signal?: AbortSignal,
   startInterval?: number,
+  fastWindow = 0,
 ) {
   const start = Date.now();
   // Exponential warm-up (Python parity): the first seconds of readiness matter
@@ -65,7 +67,10 @@ export async function waitForPhased(
     }
 
     await wait(delay * 1_000, signal);
-    delay = Math.min(interval, delay * 2);
+
+    if (Date.now() - start >= fastWindow * 1_000) {
+      delay = Math.min(interval, delay * 2);
+    }
   }
 
   return false;

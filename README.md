@@ -74,7 +74,7 @@ Creates a new sandbox.
 | `_experimental_enable_light_sleep` | When enabled, uses idle_timeout for light_sleep and sets deep_sleep=3900.                                                           |
 | `block_network`                    | Block all outbound network access. Mutually exclusive with `outbound_allowlist`.                                                    |
 | `outbound_allowlist`               | IPs/CIDRs allowed as outbound destinations; all other traffic is blocked. Bare IPs are normalized to `/32` (IPv4) or `/128` (IPv6). |
-| `poll_interval`                    | Seconds between readiness polls (defaults to `0.5`).                                                                                |
+| `poll_interval`                    | Longest delay in seconds between readiness polls after the first 10 s (defaults to `0.5`).                                          |
 | `cleanup_on_failure`               | Best-effort delete of the sandbox when readiness fails (default `true`). Pass `false` to keep a failed sandbox for inspection.       |
 
 ### `Sandbox.get_from_id(serviceId, apiToken?, host?)`
@@ -128,12 +128,12 @@ Resolves to `true` once the service is `HEALTHY` or `DEGRADED` (usable), or `fal
 | `STARTING`, `RESUMING`                                           | Keep polling     |
 | `UNHEALTHY`, `DELETING`, `DELETED`, `PAUSING`, `PAUSED`, unknown | Terminal failure |
 
-| Option          | Description                                                             |
-| --------------- | ----------------------------------------------------------------------- |
-| `timeout`       | Seconds to wait before giving up. Defaults to 300.                      |
-| `poll_interval` | Seconds between Get Service polls. Defaults to 2.                       |
-| `api_token`     | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`. |
-| `signal`        | `AbortSignal` to stop waiting early.                                    |
+| Option          | Description                                                                                   |
+| --------------- | --------------------------------------------------------------------------------------------- |
+| `timeout`       | Seconds to wait before giving up. Defaults to 300.                                            |
+| `poll_interval` | Longest delay in seconds between Get Service polls, which back off from 0.1. Defaults to 0.5. |
+| `api_token`     | API token for authentication, overriding `process.env.KOYEB_API_TOKEN`.                       |
+| `signal`        | `AbortSignal` to stop waiting early.                                                          |
 
 ```js
 import { Sandbox, claim, wait_claim_ready } from '@koyeb/sandbox-sdk';
@@ -220,17 +220,17 @@ await pool.delete();
 
 ## Sandbox Lifecycle & Metadata
 
-| Method                                                   | Description                                                                                                                                                                                                                                                                                             |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `wait_ready(timeout?, pollInterval?, signal?)`           | Waits for the deployment to be `HEALTHY`, then for `/health` to answer, polling with backoff from 0.1 s up to `pollInterval` (default 0.5 s). Resolves to `true` once ready, `false` on timeout; throws `SandboxDeploymentError` as soon as the deployment reaches a status that will not become ready. |
-| `wait_tcp_proxy_ready(timeout?, pollInterval?, signal?)` | Polls until TCP proxy information becomes available.                                                                                                                                                                                                                                                    |
-| `is_healthy()`                                           | Performs a `/health` check against the sandbox URL.                                                                                                                                                                                                                                                     |
-| `get_sandbox_url()`                                      | Returns the HTTPS URL (`https://<domain>/koyeb-sandbox`).                                                                                                                                                                                                                                               |
-| `get_tcp_proxy_info()`                                   | Returns `[host, publicPort]` once the TCP proxy is ready, otherwise `undefined`.                                                                                                                                                                                                                        |
-| `get_domain()`                                           | Fetches and caches the sandbox's public URL, protocol included (`https://…`). See [Python SDK parity](#python-sdk-parity) for the known divergence with the Python SDK.                                                                                                                                   |
-| `update_lifecycle()`                                     | Change the auto deletion properties.                                                                                                                                                                                                                                                                    |
-| `update_network_policy(values?)`                         | Update the egress policy (block, allowlist, or reset). Triggers a redeployment.                                                                                                                                                                                                                         |
-| `delete()`                                               | Tears down the underlying service.                                                                                                                                                                                                                                                                      |
+| Method                                                   | Description                                                                                                                                                                                                                                                                                                                       |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wait_ready(timeout?, pollInterval?, signal?)`           | Waits for the deployment to be `HEALTHY`, then for `/health` to answer, polling every 0.1 s for the first 10 s, then with backoff up to `pollInterval` (default 0.5 s). Resolves to `true` once ready, `false` on timeout; throws `SandboxDeploymentError` as soon as the deployment reaches a status that will not become ready. |
+| `wait_tcp_proxy_ready(timeout?, pollInterval?, signal?)` | Polls until TCP proxy information becomes available.                                                                                                                                                                                                                                                                              |
+| `is_healthy()`                                           | Performs a `/health` check against the sandbox URL.                                                                                                                                                                                                                                                                               |
+| `get_sandbox_url()`                                      | Returns the HTTPS URL (`https://<domain>/koyeb-sandbox`).                                                                                                                                                                                                                                                                         |
+| `get_tcp_proxy_info()`                                   | Returns `[host, publicPort]` once the TCP proxy is ready, otherwise `undefined`.                                                                                                                                                                                                                                                  |
+| `get_domain()`                                           | Fetches and caches the sandbox's public URL, protocol included (`https://…`). See [Python SDK parity](#python-sdk-parity) for the known divergence with the Python SDK.                                                                                                                                                           |
+| `update_lifecycle()`                                     | Change the auto deletion properties.                                                                                                                                                                                                                                                                                              |
+| `update_network_policy(values?)`                         | Update the egress policy (block, allowlist, or reset). Triggers a redeployment.                                                                                                                                                                                                                                                   |
+| `delete()`                                               | Tears down the underlying service.                                                                                                                                                                                                                                                                                                |
 
 ## Command Execution
 

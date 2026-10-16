@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Readiness waits poll faster near readiness
+
+- `wait_ready()` (and `Sandbox.create()`) checks every 0.1 s for the first 10 s of the
+  wait, then backs off up to `poll_interval` as before. It sees a sandbox turn healthy
+  ~0.1 s after it happens, instead of up to 0.5 s later.
+- `wait_claim_ready()` backs off 0.1 → 0.2 → 0.4 → 0.5 s instead of polling every 2 s:
+  `DEFAULT_CLAIM_POLL_INTERVAL` goes from 2 to 0.5, and a `poll_interval` you pass caps
+  the backoff.
+- Both send more status requests per wait: a create ready in ~4 s makes ~28 API requests
+  instead of ~10, a claim that starts its sandbox ~14 instead of ~7.
+
 ### Streaming `exec` retries a refused connect, as `stream: false` does
 
 `exec()` (streaming by default) and `exec_stream()` now send the command again when the

@@ -6,6 +6,7 @@ import {
   DEFAULT_SNAPSHOT_WAIT_TIMEOUT,
   DEFAULT_WAIT_START_INTERVAL,
   DEFAULT_WAIT_TIMEOUT,
+  FAST_POLL_WINDOW,
   PORT_MAX,
   PORT_MIN,
 } from './constants.js';
@@ -449,6 +450,7 @@ export class Sandbox {
       pollInterval,
       signal,
       DEFAULT_WAIT_START_INTERVAL,
+      FAST_POLL_WINDOW,
     );
   }
 

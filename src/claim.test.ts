@@ -278,9 +278,41 @@ describe('get_claim', () => {
 });
 
 describe('wait_claim_ready', () => {
-  it('uses the dedicated 2s claim poll interval, not the sandbox default', () => {
-    // Python keeps claim polling at 2.0s even though sandbox readiness polls at 0.5s.
-    expect(DEFAULT_CLAIM_POLL_INTERVAL).toBe(2);
+  it('backs off from 0.1 s up to the 0.5 s claim poll interval', async () => {
+    expect(DEFAULT_CLAIM_POLL_INTERVAL).toBe(0.5);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'Date'] });
+    const polls: number[] = [];
+    const start = Date.now();
+    const { fetch } = fakeFetch([serviceReply('STARTING')], { repeatLast: true });
+    fetch.mockImplementation(async () => {
+      polls.push(Date.now() - start);
+      return serviceReply(polls.length < 6 ? 'STARTING' : 'HEALTHY');
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    const pending = wait_claim_ready('svc-1', { api_token: 'token' });
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await expect(pending).resolves.toBe(true);
+    expect(polls).toEqual([0, 100, 300, 700, 1200, 1700]);
+  });
+
+  it('caps the backoff at an explicit poll_interval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'Date'] });
+    const polls: number[] = [];
+    const start = Date.now();
+    const { fetch } = fakeFetch([serviceReply('STARTING')], { repeatLast: true });
+    fetch.mockImplementation(async () => {
+      polls.push(Date.now() - start);
+      return serviceReply(polls.length < 7 ? 'STARTING' : 'HEALTHY');
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    const pending = wait_claim_ready('svc-1', { api_token: 'token', poll_interval: 2 });
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    await expect(pending).resolves.toBe(true);
+    expect(polls).toEqual([0, 100, 300, 700, 1500, 3100, 5100]);
   });
 
   it('resolves true once the service is HEALTHY', async () => {

@@ -105,6 +105,10 @@ describe('pathMatch', () => {
     expect(() => pathMatch('a*x[', 'b')).toThrow();
   });
 
+  it('a failed match with a valid mid-escape remainder is a mismatch, not an error', () => {
+    expect(pathMatch('x\\y', 'a')).toBe(false);
+  });
+
   it('treats a mismatched final unit as a failed match, not a chunk end', () => {
     // The buggy reading matched a*b against b (Go: false).
     const rows: Array<[string, string, boolean]> = [
@@ -612,6 +616,31 @@ describe('buildArchive and extractArchive', () => {
       expect((await lstat(join(dst, 'link'))).isSymbolicLink()).toBe(true);
       expect(await readFile(join(dst, 'link'), 'utf-8')).toBe('hello');
       expect((await stat(join(dst, 'empty'))).isDirectory()).toBe(true);
+    });
+  });
+
+  it('archives the live bytes when a file changed after the walk', async () => {
+    await withTmpDir(async (root) => {
+      const src = join(root, 'src');
+      const dst = join(root, 'dst');
+      const archive = join(root, 'batch.tgz');
+      await mkdir(src);
+      await mkdir(dst);
+      const entries = await tree(src);
+      // The walk is done; the files change before the batch spools. The
+      // header must describe the bytes the archive actually carries — a
+      // stale walk-time size misaligns the padding and corrupts the batch.
+      await writeFile(join(src, 'a.txt'), 'hello and then some'); // grew
+      await writeFile(joinLocal(src, 'sub/b.bin'), new Uint8Array([0x42])); // shrank
+
+      await buildArchive(src, entries, archive);
+      const extracted = await extractArchive(archive, dst);
+
+      expect(await readFile(join(dst, 'a.txt'), 'utf-8')).toBe('hello and then some');
+      expect(new Uint8Array(await readFile(join(dst, 'sub', 'b.bin')))).toEqual(new Uint8Array([0x42]));
+      // The members behind the changed files ride unharmed.
+      expect(extracted.sort()).toEqual(['a.txt', 'empty', 'link', 'sub', 'sub/b.bin']);
+      expect((await lstat(join(dst, 'link'))).isSymbolicLink()).toBe(true);
     });
   });
 

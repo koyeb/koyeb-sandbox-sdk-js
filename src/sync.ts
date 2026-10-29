@@ -630,11 +630,31 @@ export async function buildArchive(root: string, entries: SyncEntry[], dest: str
   const blocks = async function* (): AsyncGenerator<Uint8Array, void, unknown> {
     for (const entry of entries) {
       const linkname = entry.type === 'symlink' ? await fsp.readlink(joinLocal(root, entry.path)) : undefined;
-      const member = tarMember(entry, linkname);
+      let member = tarMember(entry, linkname);
+      if (member.type === 'file') {
+        // The walk's size can be stale by spool time; a header that does
+        // not describe the carried bytes misaligns the padding and the batch.
+        member = { ...member, size: (await fsp.stat(joinLocal(root, entry.path))).size };
+      }
       yield* ustarHeaders(member);
       if (member.type === 'file') {
+        let sent = 0;
         for await (const chunk of createReadStream(joinLocal(root, entry.path))) {
-          yield chunk as Buffer;
+          // A concurrent writer cannot be allowed to overflow the header's
+          // size; extra bytes would desynchronize the next member.
+          const take = chunk as Buffer;
+          const room = member.size - sent;
+          if (take.length > room) {
+            yield take.subarray(0, room);
+            sent = member.size;
+            break;
+          }
+          yield take;
+          sent += take.length;
+          if (sent === member.size) break;
+        }
+        if (sent < member.size) {
+          throw new Error(`file changed while it was archived: ${entry.path}`);
         }
         const padding = (BLOCK_SIZE - (member.size % BLOCK_SIZE)) % BLOCK_SIZE;
         if (padding > 0) yield new Uint8Array(padding);

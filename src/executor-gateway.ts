@@ -28,6 +28,27 @@ export type FileStatEntry = {
 /** The PUT /files commit reply: the received size and the content digest. */
 export type FilesPutReply = { size: number; sha256: string };
 
+/** The multipart session reply: the id parts address, and the byte cap each part must fit. */
+export type FilesUploadSession = { upload_id: string; max_part_size: number };
+
+/** One half-open [start, end) span of received bytes. */
+export type FilesUploadSpan = { start: number; end: number };
+
+/** The session's progress report: half-open, sorted, coalesced ranges — never null. */
+export type FilesUploadStatus = { size: number; ranges: FilesUploadSpan[] };
+
+/** The commit reply: size always, sha256 only when the open promised one. */
+export type FilesUploadCompleteReply = { size: number; sha256?: string };
+
+/** A whole or ranged GET /files reply: the status (200 whole, 206 slice), the
+ *  strong validator the executor sent (absent for size-0 pseudo-files), and
+ *  the idle-bounded body stream. */
+export type FilesReadRangeReply = {
+  status: number;
+  etag?: string;
+  stream: AsyncGenerator<Uint8Array, void, unknown>;
+};
+
 /** What PUT /files accepts: bytes, or a stream the transport drains chunk by chunk. */
 export type FilesPutContent = Uint8Array | ReadableStream<Uint8Array> | NodeJS.ReadableStream;
 
@@ -352,14 +373,36 @@ export class ExecutorGateway {
    * with a SandboxTimeoutError naming the bound.
    */
   async *filesRead(path: string, options: { signal?: AbortSignal } = {}): AsyncGenerator<Uint8Array, void, unknown> {
+    const reply = await this.filesReadRange(path, options);
+    yield* reply.stream;
+  }
+
+  /**
+   * GET /files with the resume headers (executor v0.0.24+): Range and If-Range
+   * pass through, the reply's status (200 whole vs 206 slice) and strong ETag
+   * come back beside the body stream. One non-retrying request — resuming is
+   * the fs layer's loop around this seam, bounded by the same 60 s idle clock.
+   */
+  async filesReadRange(
+    path: string,
+    options: { range?: string; ifRange?: string; signal?: AbortSignal } = {},
+  ): Promise<FilesReadRangeReply> {
     const params = new URLSearchParams({ path });
+    const headers = new Headers();
+    if (options.range) {
+      headers.set('Range', options.range);
+    }
+    if (options.ifRange) {
+      headers.set('If-Range', options.ifRange);
+    }
+
     const idle = new IdleTimeout(DEFAULT_FILES_IDLE_TIMEOUT, this.options.name ?? 'sandbox');
     idle.attach(options.signal);
 
     let response: Response;
     try {
       response = await raceAbort(
-        this.send(`/files?${params}`, { method: 'GET', signal: idle.signal }),
+        this.send(`/files?${params}`, { method: 'GET', headers, signal: idle.signal }),
         idle.signal,
         () => idle.abortReason(),
       );
@@ -374,6 +417,19 @@ export class ExecutorGateway {
       throw raiseForFilesStatus(response.status, text);
     }
 
+    return {
+      status: response.status,
+      etag: response.headers.get('ETag') ?? undefined,
+      stream: this.pumpFilesBody(response, idle),
+    };
+  }
+
+  /** The body half of a streamed GET: idle-bounded reads, clock disarmed at
+   * yield (a consumer's pause is not a stall), connection freed on early exit. */
+  private async *pumpFilesBody(
+    response: Response,
+    idle: IdleTimeout,
+  ): AsyncGenerator<Uint8Array, void, unknown> {
     const body = response.body;
     if (!body) {
       idle.dispose();
@@ -404,6 +460,174 @@ export class ExecutorGateway {
       if (!completed) {
         body.cancel().catch(() => {});
       }
+    }
+  }
+
+  /**
+   * Open a multipart upload session (executor v0.0.24+).
+   *
+   * A file too large for one request uploads as offset-addressed parts: the
+   * executor truncates a temp file to `size` up front, so parts land in any
+   * order, in parallel, and a retried part overwrites the same bytes. Sessions
+   * live in memory — an executor restart or an idle hour loses them, and the
+   * upload starts over. One attempt only: a blind retry would orphan a session
+   * (Python parity: no 5xx retry on open; fetch cannot prove a network error
+   * happened before the executor saw the request, so nothing is retried).
+   */
+  async filesUploadOpen(
+    path: string,
+    size: number,
+    options: { mode?: string; sha256?: string; signal?: AbortSignal } = {},
+  ): Promise<FilesUploadSession> {
+    const body: Record<string, unknown> = { path, size };
+    if (options.mode !== undefined) {
+      body.mode = options.mode;
+    }
+    if (options.sha256) {
+      body.sha256 = options.sha256;
+    }
+    return this.postNoRetry<FilesUploadSession>('/files/uploads', { method: 'POST', signal: options.signal }, body);
+  }
+
+  /**
+   * Write one part at its offset (executor v0.0.24+).
+   *
+   * The content is bytes, never a consumed stream — replayable by contract —
+   * so transient network errors and 5xx retry with backoff like the JSON
+   * routes (a retried part overwrites the same bytes at the executor). A fired
+   * timeout is never retried: the fs layer answers it by splitting the part.
+   * The timeout bounds idle time (60 s), re-armed as the body's chunks move.
+   */
+  async filesUploadPart(
+    uploadId: string,
+    offset: number,
+    content: Uint8Array,
+    options: { sha256?: string; signal?: AbortSignal } = {},
+  ): Promise<void> {
+    const params = new URLSearchParams({ offset: String(offset) });
+    const headers = new Headers({ 'Content-Type': 'application/octet-stream' });
+    if (options.sha256) {
+      headers.set('X-Content-SHA256', options.sha256);
+    }
+
+    let backoff = DEFAULT_EXECUTOR_RETRY_DELAY_MS;
+
+    for (let attempt = 0; ; attempt++) {
+      const idle = new IdleTimeout(DEFAULT_FILES_IDLE_TIMEOUT, this.options.name ?? 'sandbox');
+      idle.attach(options.signal);
+      try {
+        const init: StreamedRequestInit = {
+          method: 'PUT',
+          headers,
+          signal: idle.signal,
+          body: withIdleTouch(chunkedStream(content), idle) as BodyInit,
+          duplex: 'half',
+        };
+        const response = await raceAbort(
+          this.send(`/files/uploads/${uploadId}?${params}`, init),
+          idle.signal,
+          () => idle.abortReason(),
+        );
+
+        if (response.status >= 500 && attempt < DEFAULT_EXECUTOR_RETRIES) {
+          // Free the connection before the retry and honor early aborts.
+          if (response.body) {
+            await response.body.cancel().catch(() => {});
+          }
+          await wait(backoff, options.signal);
+          backoff *= 2;
+          continue;
+        }
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw raiseForFilesStatus(response.status, text);
+        }
+        return; // 204: the part landed at its offset
+      } catch (error) {
+        const classified = idle.classify(error);
+        if (classified !== error) {
+          throw classified; // a fired timeout is never retried — the fs layer splits
+        }
+        if (error instanceof SandboxError) {
+          throw error; // taxonomy-mapped (4xx, exhausted 5xx): the executor answered
+        }
+        if (options.signal?.aborted) {
+          throw error; // the caller's abort, raw
+        }
+        if (attempt >= DEFAULT_EXECUTOR_RETRIES) {
+          throw new SandboxConnectionError(`Request to sandbox executor failed: ${String(error)}`, {
+            cause: error,
+          });
+        }
+        await wait(backoff, options.signal);
+        backoff *= 2;
+      } finally {
+        idle.dispose();
+      }
+    }
+  }
+
+  /**
+   * The ranges received so far (executor v0.0.24+): half-open [start, end)
+   * spans, sorted and coalesced, so a live session can resume by sending what
+   * is missing.
+   */
+  async filesUploadStatus(uploadId: string, options: { signal?: AbortSignal } = {}): Promise<FilesUploadStatus> {
+    return this.post<FilesUploadStatus>(`/files/uploads/${uploadId}`, { method: 'GET', signal: options.signal });
+  }
+
+  /**
+   * Check coverage and commit (executor v0.0.24+).
+   *
+   * A 409 carries the missing ranges in the error body — the session stays
+   * live, so the caller can fill the gaps and complete again. One attempt
+   * only: a blind retry would double-submit the commit (Python parity).
+   */
+  async filesUploadComplete(
+    uploadId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<FilesUploadCompleteReply> {
+    return this.postNoRetry<FilesUploadCompleteReply>(`/files/uploads/${uploadId}/complete`, {
+      method: 'POST',
+      signal: options.signal,
+    });
+  }
+
+  /** Abort the session and remove its temp file (executor v0.0.24+). */
+  async filesUploadAbort(uploadId: string, options: { signal?: AbortSignal } = {}): Promise<void> {
+    await this.post<void>(`/files/uploads/${uploadId}`, { method: 'DELETE', signal: options.signal });
+  }
+
+  /** One JSON attempt, deadline-armed, taxonomy-mapped: no retries at all.
+   *
+   * Open and complete must never run twice — the first creates executor state,
+   * the second double-submits the commit — and fetch cannot prove a network
+   * error happened before the executor saw the request, so nothing retries
+   * (Python retries connect-time errors only; this is the safe side of that
+   * line, the same judgment as filesPut).
+   */
+  private async postNoRetry<T = any>(path: string, init: RequestInit, body?: unknown): Promise<T> {
+    const deadline = this.armRequestTimeout(init, DEFAULT_HTTP_TIMEOUT);
+    try {
+      const response = await this.send(path, { ...init, signal: deadline.signal }, body);
+      return await this.parse<T>(response);
+    } catch (error) {
+      if (deadline.timedOut()) {
+        throw new SandboxTimeoutError(
+          this.options.name ?? 'sandbox',
+          deadline.timeout,
+          `Request timed out after ${deadline.timeout}s`,
+        );
+      }
+      if (init.signal?.aborted) {
+        throw error;
+      }
+      throw error instanceof SandboxError
+        ? error
+        : new SandboxConnectionError(`Request to sandbox executor failed: ${String(error)}`, { cause: error });
+    } finally {
+      deadline.dispose();
     }
   }
 

@@ -74,3 +74,27 @@ await sandbox.filesystem.download_file(remotePath, localPath); // remote → loc
 not reach `^1.1.0` consumers through a minor bump. Alternative: accept in `1.2.0` with
 this loud changelog entry if adoption is confirmed to be near-zero; the final call is
 flagged in the pull request.
+
+### Multipart uploads + resumable downloads for files larger than one request (ST-136, KOYEB-6700)
+
+A file larger than `part_size` no longer needs a proxy body big enough to carry it:
+`upload_file` opens an offset-addressed session on the executor (v0.0.24+) and sends
+it as parts. Downloads resume after a network error instead of starting over.
+
+- `upload_file(localPath, remotePath, { part_size?, concurrency?, … })` — default
+  50 MiB parts (capped by the executor's `max_part_size`, 100 MiB), 4 parts in flight,
+  each read from disk at its offset per attempt, per-part sha256, whole-file sha256
+  verified at complete. Memory holds `part_size × concurrency`
+- Retry per part, never per body: transient network errors retry a part alone (the
+  bytes are replayable; the executor overwrites the same bytes). A part that times out
+  or hits Cloudflare's 524 splits in half, recursively down to a 1 MiB floor — a
+  smaller part needs less time on the wire
+- Resume without re-sending: `complete` reports the missing ranges in its 409 and the
+  flow fills exactly those; a lost session (executor restart, 1 h idle expiry)
+  surfaces as a clean "restart the upload" error, never corruption. Every failure
+  aborts its session, and the abort never masks the cause
+- `download_file(remotePath, localPath)` resumes by default: after a network error
+  the remaining bytes are fetched with `Range` + `If-Range` on the executor's strong
+  ETag — received bytes are never re-sent; a file that changed under us restarts the
+  `.part` from scratch. Attempts that land nothing back off and surface after 3
+  retries; a transfer that keeps moving keeps going

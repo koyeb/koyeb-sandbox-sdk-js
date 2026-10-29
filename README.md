@@ -303,8 +303,8 @@ Access via `sandbox.filesystem`. On executors v0.0.24+ the byte-moving operation
 | `exists(path)`                         | Return `true` if the path exists.                     |
 | `is_file(path)`                        | Return `true` if the path is a regular file.          |
 | `is_dir(path)`                         | Return `true` if the path is a directory.             |
-| `upload_file(localPath, remotePath, options?)`  | Stream a local file to the sandbox: `progress(done, total)` at most every 100 ms, `signal` honored mid-flight, sha256 verified end to end. Legacy-only `options.encoding` picks the transport: `'utf-8'` (default) or `'base64'` (binary). |
-| `download_file(remotePath, localPath, options?)` | Stream a sandbox file to disk into `<local>.part`, renamed into place on success. Same options as the upload. |
+| `upload_file(localPath, remotePath, options?)`  | Stream a local file to the sandbox: `progress(done, total)` at most every 100 ms, `signal` honored mid-flight, sha256 verified end to end. Above `options.part_size` (default 50 MiB, capped by the executor's 100 MiB) the file uploads as a multipart session — `options.concurrency` parts in flight (default 4, memory = `part_size × concurrency`), timed-out parts split, missing ranges refilled from complete's 409. Legacy-only `options.encoding` picks the transport: `'utf-8'` (default) or `'base64'` (binary). |
+| `download_file(remotePath, localPath, options?)` | Stream a sandbox file to disk into `<local>.part`, renamed into place on success — resuming by default after a network error with `Range` + `If-Range` on the executor's strong ETag (received bytes are never re-sent; a file that changed restarts clean). Same options as the upload. |
 
 > **Warning — breaking change:** `download_file` takes `(remotePath, localPath)`,
 > matching the Python SDK and the CLI, and `read_file` returns the content directly —
@@ -413,6 +413,9 @@ TypeScript type.
 | Download stat validation | Requires the full stat shape at the download seam (fail-fast on garbage) | Reads only the `size` field | Documented divergence — the executor always returns the full shape. |
 | `open()` | Not implemented | `SandboxFileIO` file-like object | Documented divergence — `read_file`/`write_file`/`read_stream` cover the surface. |
 | Streamed PUT retry | Never retried: a stream cannot be replayed | Connect-time failures retry | Documented divergence — retry at the call site if a cold-start PUT fails. |
+| Multipart open/complete retry | Never retried: fetch cannot prove a network error predated the executor seeing the request | Connect-time failures retry | Documented divergence — the safe side of the line: a blind retry would orphan a session or double-submit the commit. |
+| `upload_file` timeout override | `signal` (AbortSignal) cancels mid-flight; no per-call seconds override | `timeout=` seconds override wires into every session call | Documented divergence — the JS transfer seam is signal-based (ST-135's judgment); porting `timeout=` is a follow-up if callers ask. |
+| `download_file` resume | On by default: `Range` + `If-Range` on the strong ETag after a network error, restart on validator miss, 3-attempt no-progress budget | Not shipped in ST-126's PR (planned slice 3, deferred) | JS ahead — flagged for port-back to Python; the parity tests here pin the JS behavior. |
 
 ## Contributing
 

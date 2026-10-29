@@ -352,11 +352,14 @@ describe('DeclarativeSnapshot', () => {
     expect(() => Sandbox.template('tpl', 'python:3.12')).toThrow(MissingApiTokenError);
   });
 
-  function builderMock() {
+  function builderMock(newRoutes = false) {
     return {
+      hasFilesRoutes: vi.fn(async () => newRoutes),
       filesystem: {
         mkdir: vi.fn(),
         write_file: vi.fn(),
+        sync: vi.fn(async () => ({ uploaded: 0, deleted: 0, skipped: 0, bytes: 0 })),
+        upload_file: vi.fn(async () => {}),
       },
       exec: vi.fn(async () => ({ stdout: '', stderr: '', code: 0 })),
       snapshot: vi.fn(async () => ({ id: 'snap-9', operations: [] })),
@@ -408,7 +411,9 @@ describe('DeclarativeSnapshot', () => {
   });
 
   it('copy() walks local directories, creating them like Python', async () => {
-    const builder = builderMock();
+    // The legacy arm keeps its historical shape: directories created,
+    // files read as text (Python parity: the pre-v0.0.24 walk).
+    const builder = builderMock(false);
     vi.spyOn(Sandbox, 'create').mockResolvedValue(builder as never);
     const dir = await mkdtemp(join(tmpdir(), 'koyeb-copy-'));
     await writeFile(join(dir, 'a.txt'), 'hello');
@@ -424,9 +429,112 @@ describe('DeclarativeSnapshot', () => {
       expect(builder.filesystem.mkdir).not.toHaveBeenCalledWith('/remote');
       expect(builder.filesystem.write_file).toHaveBeenCalledWith('/remote/a.txt', 'hello');
       expect(builder.filesystem.write_file).toHaveBeenCalledWith('/remote/nested/b.txt', 'deep');
+      expect(builder.filesystem.sync).not.toHaveBeenCalled();
       expect(builder.delete).toHaveBeenCalled();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+describe('DeclarativeSnapshot copy on the new routes', () => {
+  /** A local tree: text contents — the legacy arm reads files as text. */
+  async function tree(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'koyeb-copy-new-'));
+    await mkdir(join(root, 'sub'), { recursive: true });
+    await writeFile(join(root, 'a.txt'), 'hello');
+    await writeFile(join(root, 'sub', 'b.txt'), 'world');
+    return root;
+  }
+
+  it('a directory travels as one archive push through sync', async () => {
+    const builder = builderMock(true);
+    vi.spyOn(Sandbox, 'create').mockResolvedValue(builder as never);
+    const src = await tree();
+
+    try {
+      await Sandbox.template('tpl', 'python:3.12', { api_token: 't' }).copy(src, '/remote').build();
+
+      // One sync push: binary-safe, modes/mtimes/symlinks kept — the
+      // legacy walk read files as text and lost all of that.
+      expect(builder.filesystem.sync).toHaveBeenCalledTimes(1);
+      expect(builder.filesystem.sync).toHaveBeenCalledWith(src, '/remote');
+      expect(builder.filesystem.mkdir).not.toHaveBeenCalled();
+      expect(builder.filesystem.write_file).not.toHaveBeenCalled();
+      expect(builder.filesystem.upload_file).not.toHaveBeenCalled();
+    } finally {
+      await rm(src, { recursive: true, force: true });
+    }
+  });
+
+  it('a single file travels through the streamed upload_file', async () => {
+    const builder = builderMock(true);
+    vi.spyOn(Sandbox, 'create').mockResolvedValue(builder as never);
+    const src = await mkdtemp(join(tmpdir(), 'koyeb-copy-one-'));
+    const one = join(src, 'one.bin');
+    await writeFile(one, new Uint8Array([0x00, 0x01]));
+
+    try {
+      await Sandbox.template('tpl', 'python:3.12', { api_token: 't' }).copy(one, '/remote/one.bin').build();
+
+      // No probe needed: upload_file carries its own legacy fallback.
+      expect(builder.hasFilesRoutes).not.toHaveBeenCalled();
+      expect(builder.filesystem.upload_file).toHaveBeenCalledWith(one, '/remote/one.bin');
+      expect(builder.filesystem.sync).not.toHaveBeenCalled();
+      expect(builder.filesystem.write_file).not.toHaveBeenCalled();
+    } finally {
+      await rm(src, { recursive: true, force: true });
+    }
+  });
+
+  it('a legacy executor keeps the per-file walk for directories', async () => {
+    const builder = builderMock(false);
+    vi.spyOn(Sandbox, 'create').mockResolvedValue(builder as never);
+    const src = await tree();
+
+    try {
+      await Sandbox.template('tpl', 'python:3.12', { api_token: 't' }).copy(src, '/remote').build();
+
+      expect(builder.hasFilesRoutes).toHaveBeenCalled();
+      expect(builder.filesystem.sync).not.toHaveBeenCalled();
+      expect(builder.filesystem.mkdir).toHaveBeenCalledWith('/remote/sub');
+      expect(builder.filesystem.write_file).toHaveBeenCalledTimes(2);
+    } finally {
+      await rm(src, { recursive: true, force: true });
+    }
+  });
+
+  it('build() applies the whole recipe through the copy seam', async () => {
+    const builder = builderMock(true);
+    vi.spyOn(Sandbox, 'create').mockResolvedValue(builder as never);
+    const src = await tree();
+
+    try {
+      const snapshot = await Sandbox.template('tpl', 'python:3.12', {
+        api_token: 't',
+        workdir: '/workspace',
+      })
+        .file('requirements.txt', 'pytest')
+        .copy(src, '/remote')
+        .run('pip install -r requirements.txt')
+        .build();
+
+      // Every recipe arm reached the builder: workdir, files, the copy
+      // seam on the new routes, commands, then the snapshot.
+      expect(builder.filesystem.mkdir).toHaveBeenCalledWith('/workspace');
+      expect(builder.filesystem.write_file).toHaveBeenCalledWith('requirements.txt', 'pytest');
+      expect(builder.filesystem.sync).toHaveBeenCalledWith(src, '/remote');
+      expect(builder.exec).toHaveBeenCalledWith('pip install -r requirements.txt', { timeout: 300 });
+      expect(builder.snapshot).toHaveBeenCalled();
+      expect(snapshot.operations).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('copy: '),
+          expect.stringContaining('create_file: requirements.txt'),
+          expect.stringContaining('run: pip install'),
+        ]),
+      );
+    } finally {
+      await rm(src, { recursive: true, force: true });
+    }
+  });
+});
 });

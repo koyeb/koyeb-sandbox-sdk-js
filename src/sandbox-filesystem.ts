@@ -8,7 +8,9 @@ import {
   SandboxTimeoutError,
 } from './errors.js';
 import type {
+  FileListEntry,
   FileStatEntry,
+  FilesArchivePutReply,
   FilesPutContent,
   FilesPutOptions,
   FilesPutReply,
@@ -24,6 +26,22 @@ import {
   UPLOAD_CONCURRENCY,
   UPLOAD_PART_SIZE,
 } from './constants.js';
+import {
+  SYNC_BATCH_BYTES,
+  buildArchive,
+  diff,
+  extractArchive,
+  hashCandidates,
+  joinLocal,
+  pathExcluded,
+  planBatches,
+  pruneDescendants,
+  relativeRemote,
+  remoteJoin,
+  walkLocal,
+  type SyncDiff,
+  type SyncEntry,
+} from './sync.js';
 import { wait } from './time.js';
 import { shellQuote } from './shell.js';
 import type { FileHandle } from 'node:fs/promises';
@@ -51,6 +69,32 @@ export type WriteFileOptions = {
 
 /** 'utf-8' → string; 'base64' → base64 of the real bytes; null → raw Uint8Array. */
 export type ReadFileEncoding = 'utf-8' | 'base64' | null;
+
+/** One-way sync's knobs: direction, pruning, excludes, checksum, dry-run. */
+export type SyncOptions = {
+  /** 'push' (local → sandbox, the default) or 'pull' (sandbox → local). */
+  direction?: 'push' | 'pull';
+  /** Remove destination entries absent from the source. */
+  delete?: boolean;
+  /** Glob patterns; a matching path (or any /-separated suffix of it) is
+   *  skipped, a matching directory whole. No default excludes. */
+  exclude?: string[];
+  /** Compare sha256 for size-and-mtime-equal files. */
+  checksum?: boolean;
+  /** Compute the plan only, transfer nothing. */
+  dry_run?: boolean;
+  /** Cancels an in-flight sync at the next transport call. */
+  signal?: AbortSignal;
+};
+
+/** What a sync moved: `uploaded` on push, `downloaded` on pull, never both. */
+export type SyncResult = {
+  uploaded?: number;
+  downloaded?: number;
+  deleted: number;
+  skipped: number;
+  bytes: number;
+};
 
 export type ReadFileOptions = { encoding?: ReadFileEncoding };
 
@@ -90,7 +134,20 @@ export type SandboxPort = {
   exec: (cmd: string, options?: { cwd?: string; env?: Record<string, string> }) => Promise<{ stdout: string; stderr: string; code: number }>;
   request: (path: string, init: RequestInit, body?: unknown) => Promise<any>;
   hasFilesRoutes: () => Promise<boolean>;
-  filesStat: (path: string) => Promise<FileStatEntry>;
+  filesStat: (path: string, options?: { hash?: 'sha256'; signal?: AbortSignal }) => Promise<FileStatEntry>;
+  filesList: (
+    path: string,
+    options?: { recursive?: boolean; signal?: AbortSignal },
+  ) => AsyncGenerator<FileListEntry, void, unknown>;
+  filesArchiveGet: (
+    path: string,
+    options?: { exclude?: string[]; signal?: AbortSignal },
+  ) => AsyncGenerator<Uint8Array, void, unknown>;
+  filesArchivePut: (
+    path: string,
+    content: FilesPutContent,
+    options?: { signal?: AbortSignal },
+  ) => Promise<FilesArchivePutReply>;
   filesPut: (path: string, content: FilesPutContent, options?: FilesPutOptions) => Promise<FilesPutReply>;
   filesRead: (path: string, options?: { signal?: AbortSignal }) => AsyncGenerator<Uint8Array, void, unknown>;
   filesReadRange: (
@@ -1016,6 +1073,333 @@ export class SandboxFilesystem {
         await fs.rm(part_path, { force: true }).catch(() => {});
       }
     }
+  }
+
+  /**
+   * Sync a directory with the sandbox, one way like `rsync -r`.
+   *
+   * Both sides are listed (a local walk against the executor's NDJSON
+   * listing) and diffed on path, type, size and mtime — whole seconds,
+   * like rsync's default; `checksum: true` adds a sha256 comparison for
+   * files that pass that test. On push, the changed set travels as ~50 MiB
+   * gzip'd tar batches through PUT /files/archive, spooled per batch so
+   * memory stays flat; on pull, the remote tree's archive streams down and
+   * only the changed set is extracted. Files larger than one batch go
+   * through upload_file/download_file instead (multipart uploads,
+   * resumable downloads), and a pull's archive leaves them out so their
+   * bytes travel once. Symlinks travel as links, modes are kept, owners
+   * are not.
+   *
+   * A no-op sync sends nothing: nothing is transferred or deleted; beyond
+   * the listing only `checksum: true` asks more — one sha256 stat per
+   * size-and-mtime-equal file. With `delete: true` the destination is
+   * pruned to match (a directory counts as one deletion); deletes ride the
+   * legacy routes, which every executor serves. `dry_run: true` computes
+   * the result without touching either side.
+   *
+   * `remote` defaults to the local path's relative form (its basename when
+   * absolute), rsync-style; relative paths resolve under the sandbox
+   * workdir. Requires executor v0.0.24+ (the streamed /files routes).
+   *
+   * @returns {uploaded|downloaded, deleted, skipped, bytes} — one direction
+   *          key per direction, exactly one is present.
+   */
+  async sync(local: string, remote?: string, options: SyncOptions = {}): Promise<SyncResult> {
+    const {
+      direction = 'push',
+      delete: doDelete = false,
+      exclude = [],
+      checksum = false,
+      dry_run = false,
+      signal,
+    } = options;
+
+    if (direction !== 'push' && direction !== 'pull') {
+      throw new SandboxFilesystemError(`direction must be 'push' or 'pull', not '${direction}'`);
+    }
+    const destination = remote ?? relativeRemote(local);
+
+    if (!(await this.sandbox.hasFilesRoutes())) {
+      throw new SandboxFilesystemError(
+        'sync requires executor v0.0.24+ (the streamed /files routes); this sandbox\'s executor is older',
+      );
+    }
+
+    return translatingFilesErrors(`sync ${direction}`, local, () =>
+      direction === 'push'
+        ? this.syncPush(local, destination, { doDelete, exclude, checksum, dry_run, signal })
+        : this.syncPull(local, destination, { doDelete, exclude, checksum, dry_run, signal }),
+    );
+  }
+
+  /** The push flow: list both sides, diff, tar the changed set over. */
+  private async syncPush(
+    local: string,
+    remote: string,
+    plan: { doDelete: boolean; exclude: string[]; checksum: boolean; dry_run: boolean; signal?: AbortSignal },
+  ): Promise<SyncResult> {
+    const { doDelete, exclude, checksum, dry_run, signal } = plan;
+    const localEntries = await walkLocal(local, exclude);
+
+    // A missing remote tree is an empty one: the archive PUT creates the
+    // root (MkdirAll), like rsync creating its destination.
+    const remoteEntries = await this.listRemote(remote, exclude, signal, true);
+
+    const hashes = await this.syncHashes(local, remote, checksum, false, localEntries, remoteEntries, signal);
+    const result = diff(localEntries, remoteEntries, { delete: doDelete, ...hashes });
+    const { batches, oversized } = planBatches(result.toTransfer, SYNC_BATCH_BYTES);
+
+    if (!dry_run) {
+      for (const batch of batches) {
+        await this.pushBatch(local, remote, batch, signal);
+      }
+      for (const entry of oversized) {
+        await this.upload_file(joinLocal(local, entry.path), remoteJoin(remote, entry.path), { signal });
+      }
+      const deleted = await this.syncRemoteDeletes(remote, result, doDelete);
+      return {
+        uploaded: result.toTransfer.length,
+        deleted,
+        skipped: result.skipped,
+        bytes: result.bytes,
+      };
+    }
+    return {
+      uploaded: result.toTransfer.length,
+      deleted: pruneDescendants(result.deletes.map((entry) => entry.path)).length,
+      skipped: result.skipped,
+      bytes: result.bytes,
+    };
+  }
+
+  /** The pull flow: list both sides, diff, extract the changed set locally. */
+  private async syncPull(
+    local: string,
+    remote: string,
+    plan: { doDelete: boolean; exclude: string[]; checksum: boolean; dry_run: boolean; signal?: AbortSignal },
+  ): Promise<SyncResult> {
+    const { doDelete, exclude, checksum, dry_run, signal } = plan;
+    // A missing destination root is an empty tree: extraction creates it,
+    // like rsync creating its destination on pull.
+    const localEntries = (await this.isLocalDir(local)) ? await walkLocal(local, exclude) : [];
+    // A missing remote source refuses the pull, rsync-style: silently
+    // treating it as an empty tree would delete the whole local side.
+    const remoteEntries = await this.listRemote(remote, exclude, signal, false);
+
+    const hashes = await this.syncHashes(local, remote, checksum, true, remoteEntries, localEntries, signal);
+    const result = diff(remoteEntries, localEntries, { delete: doDelete, ...hashes });
+    const { batches, oversized } = planBatches(result.toTransfer, SYNC_BATCH_BYTES);
+
+    // Oversized files ride download_file; the archive leaves them out so
+    // their bytes travel once.
+    const oversizedPatterns = oversized.map((entry) => entry.path);
+    // Archive excludes are glob patterns: an oversized name would also
+    // drop same-suffixed planned members — refuse loudly.
+    const colliding = [...new Set(
+      batches.flat().filter((entry) => pathExcluded(entry.path, oversizedPatterns)).map((entry) => entry.path),
+    )].sort();
+    if (colliding.length > 0) {
+      throw new SandboxFilesystemError(
+        `sync pull cannot deliver ${JSON.stringify(colliding)}: the archive exclude for oversized files ` +
+          'would also drop them; rename or sync them separately',
+      );
+    }
+
+    if (!dry_run) {
+      if (batches.length > 0) {
+        const archiveExclude = [...exclude, ...oversizedPatterns];
+        await this.pullArchive(local, remote, archiveExclude, batches, signal);
+      }
+      for (const entry of oversized) {
+        await this.download_file(remoteJoin(remote, entry.path), joinLocal(local, entry.path), { signal });
+      }
+      const deleted = await this.syncLocalDeletes(local, result, doDelete);
+      return {
+        downloaded: result.toTransfer.length,
+        deleted,
+        skipped: result.skipped,
+        bytes: result.bytes,
+      };
+    }
+    return {
+      downloaded: result.toTransfer.length,
+      deleted: pruneDescendants(result.deletes.map((entry) => entry.path)).length,
+      skipped: result.skipped,
+      bytes: result.bytes,
+    };
+  }
+
+  /** The remote listing, filtered by the exclude contract: delete must
+   *  spare what exclude promised to skip. A 404 reads as an empty tree only
+   *  on push (`missingAsEmpty`) — a pull refuses a missing source. */
+  private async listRemote(
+    remote: string,
+    exclude: string[],
+    signal: AbortSignal | undefined,
+    missingAsEmpty: boolean,
+  ): Promise<SyncEntry[]> {
+    const entries: SyncEntry[] = [];
+    try {
+      for await (const entry of this.sandbox.filesList(remote, { recursive: true, signal })) {
+        entries.push(entry);
+      }
+    } catch (error) {
+      if (!missingAsEmpty || !(error instanceof SandboxRequestError) || error.status_code !== 404) {
+        throw error;
+      }
+      return [];
+    }
+    return entries.filter((entry) => !pathExcluded(entry.path, exclude));
+  }
+
+  /** diff's hash callables, with both sides prefetched.
+   *
+   * In diff's terms the source is always the first argument: on push that
+   * is the local tree, on pull the remote one. The diff is pure and
+   * synchronous — it cannot await — so the digests are prefetched in one
+   * pass on both sides: the executor's via stat?hash=sha256 (a vanished
+   * file, 404, hashes as null: unprovable, not changed), the disk's from
+   * the local tree (Python's sync callable, made prefetch — JS file IO is
+   * async).
+   */
+  private async syncHashes(
+    local: string,
+    remote: string,
+    checksum: boolean,
+    pull: boolean,
+    sourceEntries: SyncEntry[],
+    destEntries: SyncEntry[],
+    signal?: AbortSignal,
+  ): Promise<{ localHash?: (path: string) => string | null; remoteHash?: (path: string) => string | null }> {
+    if (!checksum) return {};
+    const candidates = hashCandidates(sourceEntries, destEntries);
+
+    const stats = new Map<string, string | null>();
+    for (const path of candidates) {
+      try {
+        const entry = await this.sandbox.filesStat(remoteJoin(remote, path), { hash: 'sha256', signal });
+        stats.set(path, typeof entry?.sha256 === 'string' ? entry.sha256 : null);
+      } catch (error) {
+        if (!(error instanceof SandboxRequestError) || error.status_code !== 404) throw error;
+        stats.set(path, null);
+      }
+    }
+
+    const digests = new Map<string, string>();
+    for (const path of candidates) {
+      digests.set(path, await fileSha256(joinLocal(local, path)));
+    }
+
+    const diskSha = (path: string): string => digests.get(path) ?? '';
+    const executorSha = (path: string): string | null => stats.get(path) ?? null;
+
+    // On pull the remote tree is diff's source side.
+    return pull
+      ? { localHash: executorSha, remoteHash: diskSha }
+      : { localHash: diskSha, remoteHash: executorSha };
+  }
+
+  /** Spool one batch to disk and stream it into PUT /files/archive. */
+  private async pushBatch(
+    local: string,
+    remote: string,
+    batch: SyncEntry[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const fsp = await import('node:fs/promises');
+    const { createReadStream } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+
+    const dir = await fsp.mkdtemp(path.join(tmpdir(), 'koyeb-sync-'));
+    try {
+      const spool = path.join(dir, 'batch.tgz');
+      await buildArchive(local, batch, spool);
+      await this.sandbox.filesArchivePut(remote, createReadStream(spool), { signal });
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /** Spool the archive GET and extract only the changed set (keep). */
+  private async pullArchive(
+    local: string,
+    remote: string,
+    archiveExclude: string[],
+    batches: SyncEntry[][],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const fsp = await import('node:fs/promises');
+    const { createWriteStream } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const { pipeline } = await import('node:stream/promises');
+    const { Readable } = await import('node:stream');
+
+    const dir = await fsp.mkdtemp(path.join(tmpdir(), 'koyeb-sync-'));
+    try {
+      const spool = path.join(dir, 'batch.tgz');
+      await pipeline(
+        Readable.from(this.sandbox.filesArchiveGet(remote, { exclude: archiveExclude, signal })),
+        createWriteStream(spool),
+      );
+      const keep = new Set(batches.flat().map((entry) => entry.path));
+      await extractArchive(spool, local, keep);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /** Remote deletes: topmost paths first, already-gone tolerated — a type
+   *  flip earlier in this sync may have replaced the path's parent. */
+  private async syncRemoteDeletes(remote: string, result: SyncDiff, doDelete: boolean): Promise<number> {
+    if (!doDelete) return 0;
+    const byPath = new Map(result.deletes.map((entry) => [entry.path, entry]));
+    let count = 0;
+    for (const path of pruneDescendants([...byPath.keys()])) {
+      try {
+        if (byPath.get(path)!.type === 'dir') {
+          await this.delete_dir(remoteJoin(remote, path));
+        } else {
+          await this.delete_file(remoteJoin(remote, path));
+        }
+      } catch (error) {
+        // A type flip earlier in this sync may have replaced the path's
+        // parent; being already gone is the wanted state — the delete
+        // still counts.
+        if (!(error instanceof SandboxFileNotFoundError)) throw error;
+      }
+      count += 1;
+    }
+    return count;
+  }
+
+  /** Local deletes: topmost paths first, already-gone tolerated. */
+  private async syncLocalDeletes(local: string, result: SyncDiff, doDelete: boolean): Promise<number> {
+    if (!doDelete) return 0;
+    const fsp = await import('node:fs/promises');
+    const byPath = new Map(result.deletes.map((entry) => [entry.path, entry]));
+    let count = 0;
+    for (const path of pruneDescendants([...byPath.keys()])) {
+      const target = joinLocal(local, path);
+      const st = await fsp.lstat(target).catch(() => null);
+      if (st !== null) {
+        if (st.isDirectory()) {
+          await fsp.rm(target, { recursive: true, force: true });
+        } else {
+          await fsp.unlink(target);
+        }
+      }
+      count += 1;
+    }
+    return count;
+  }
+
+  /** Whether a local path is a directory (following symlinks, like Python's
+   *  os.path.isdir): a pull into a missing root starts from an empty tree. */
+  private async isLocalDir(local: string): Promise<boolean> {
+    const fsp = await import('node:fs/promises');
+    return fsp.stat(local).then((st) => st.isDirectory()).catch(() => false);
   }
 
   /** Stream the bytes into `handle`, resuming after a failure.

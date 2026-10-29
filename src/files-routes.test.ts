@@ -9,6 +9,7 @@ afterEach(() => {
 
 import { ExecutorGateway } from './executor-gateway.js';
 import {
+  SandboxConnectionError,
   SandboxError,
   SandboxRequestError,
   SandboxServiceError,
@@ -238,6 +239,319 @@ describe('files_read', () => {
 
     expect(error).toBeInstanceOf(SandboxRequestError);
     expect((error as SandboxRequestError).status_code).toBe(400);
+  });
+});
+
+describe('files_upload_open', () => {
+  it('sends POST with the session payload and returns the reply', async () => {
+    const seen: Record<string, unknown> = {};
+    const send = vi.fn(async (_path: string, init: RequestInit, body?: unknown) => {
+      seen['method'] = init.method;
+      seen['body'] = body;
+      return jsonResponse({ upload_id: 'u-1', max_part_size: 104857600 });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const reply = await gateway.filesUploadOpen('/tmp/a.bin', 1024, {
+      mode: '0644',
+      sha256: 'ab'.repeat(32),
+    });
+
+    expect(send.mock.calls[0][0]).toBe('/files/uploads');
+    expect(seen['method']).toBe('POST');
+    expect(seen['body']).toEqual({
+      path: '/tmp/a.bin',
+      size: 1024,
+      mode: '0644',
+      sha256: 'ab'.repeat(32),
+    });
+    expect(reply).toEqual({ upload_id: 'u-1', max_part_size: 104857600 });
+  });
+
+  it('omits the optionals when not asked', async () => {
+    const seen: Record<string, unknown> = {};
+    const send = vi.fn(async (_path: string, _init: RequestInit, body?: unknown) => {
+      seen['body'] = body;
+      return jsonResponse({ upload_id: 'u-2', max_part_size: 1 });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    await gateway.filesUploadOpen('/tmp/a.bin', 0);
+
+    expect(seen['body']).toEqual({ path: '/tmp/a.bin', size: 0 });
+  });
+
+  it('does not retry a 500: a blind retry orphans a session', async () => {
+    const send = vi.fn(async () => jsonResponse({ error: 'boom' }, 500));
+    const gateway = new ExecutorGateway(send);
+
+    await expect(gateway.filesUploadOpen('/tmp/a.bin', 1024)).rejects.toBeInstanceOf(SandboxServiceError);
+
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a network error: fetch cannot prove the open never reached the executor', async () => {
+    const send = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const gateway = new ExecutorGateway(send);
+
+    await expect(gateway.filesUploadOpen('/tmp/a.bin', 1024)).rejects.toBeInstanceOf(SandboxConnectionError);
+
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps a 400 to SandboxRequestError', async () => {
+    const send = vi.fn(async () =>
+      jsonResponse({ error: 'size is required and must be a non-negative integer' }, 400),
+    );
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesUploadOpen('/tmp/a.bin', -1).catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxRequestError);
+    expect((error as SandboxRequestError).status_code).toBe(400);
+  });
+});
+
+describe('files_upload_part', () => {
+  it('writes the part at its offset with the digest header', async () => {
+    const seen: Record<string, unknown> = {};
+    const send = vi.fn(async (path: string, init: RequestInit) => {
+      seen['path'] = path;
+      seen['method'] = init.method;
+      seen['contentType'] = new Headers(init.headers).get('Content-Type');
+      seen['sha'] = new Headers(init.headers).get('X-Content-SHA256');
+      seen['body'] = await readBody(init);
+      return new Response(null, { status: 204 });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    await gateway.filesUploadPart('u-1', 50, new TextEncoder().encode('abc'), { sha256: 'ff'.repeat(32) });
+
+    expect(seen['path']).toBe('/files/uploads/u-1?offset=50');
+    expect(seen['method']).toBe('PUT');
+    expect(seen['contentType']).toBe('application/octet-stream');
+    expect(seen['sha']).toBe('ff'.repeat(32));
+    expect(new TextDecoder().decode(seen['body'] as Uint8Array)).toBe('abc');
+  });
+
+  it('retries a transient network error: the part is replayable bytes', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const send = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError('fetch failed: socket reset');
+      return new Response(null, { status: 204 });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const pending = gateway.filesUploadPart('u-1', 0, new TextEncoder().encode('abc'));
+    await vi.advanceTimersByTimeAsync(1_000); // the retry backoff
+    await pending;
+
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a 5xx like the JSON routes: the executor overwrites the same bytes', async () => {
+    vi.useFakeTimers();
+    const statuses = [503, 503, 204];
+    const send = vi.fn(async () => {
+      const status = statuses.shift()!;
+      return status === 204 ? new Response(null, { status }) : jsonResponse({ error: 'unavailable' }, status);
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const pending = gateway.filesUploadPart('u-1', 0, new TextEncoder().encode('abc'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await pending;
+
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it('surfaces a 4xx without retrying: the executor answered', async () => {
+    const send = vi.fn(async () => jsonResponse({ error: 'unknown upload session' }, 404));
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesUploadPart('gone', 0, new TextEncoder().encode('abc')).catch(
+      (error: unknown) => error,
+    );
+
+    expect(error).toBeInstanceOf(SandboxRequestError);
+    expect((error as SandboxRequestError).status_code).toBe(404);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds idle time like a streamed body: names the 60s bound, never retried', async () => {
+    vi.useFakeTimers();
+    const send = hangingSend();
+    const gateway = new ExecutorGateway(send, { name: 'sbx' });
+
+    const pending = gateway.filesUploadPart('u-1', 0, new TextEncoder().encode('abc'));
+    const errorPromise = pending.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const error = await errorPromise;
+
+    expect(error).toBeInstanceOf(SandboxTimeoutError);
+    expect((error as Error).message).toBe('Request timed out after 60s');
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors the caller's signal mid-flight: the raw abort surfaces", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const send = hangingSend();
+    const gateway = new ExecutorGateway(send, { name: 'sbx' });
+
+    const pending = gateway.filesUploadPart('u-1', 0, new TextEncoder().encode('abc'), {
+      signal: controller.signal,
+    });
+    const errorPromise = pending.catch((error: unknown) => error);
+    setTimeout(() => controller.abort(), 1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const error = await errorPromise;
+
+    expect((error as Error).name).toBe('AbortError');
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('files_upload_status', () => {
+  it('returns the size and the received ranges', async () => {
+    const seen: Record<string, unknown> = {};
+    const send = vi.fn(async (path: string, init: RequestInit) => {
+      seen['path'] = path;
+      seen['method'] = init.method;
+      return jsonResponse({ size: 12, ranges: [{ start: 0, end: 4 }, { start: 8, end: 12 }] });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const status = await gateway.filesUploadStatus('u-1');
+
+    expect(seen['path']).toBe('/files/uploads/u-1');
+    expect(seen['method']).toBe('GET');
+    expect(status).toEqual({ size: 12, ranges: [{ start: 0, end: 4 }, { start: 8, end: 12 }] });
+  });
+});
+
+describe('files_upload_complete', () => {
+  it('returns the commit reply', async () => {
+    const seen: Record<string, unknown> = {};
+    const send = vi.fn(async (path: string, init: RequestInit) => {
+      seen['path'] = path;
+      seen['method'] = init.method;
+      return jsonResponse({ size: 12, sha256: 'ff'.repeat(32) });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const reply = await gateway.filesUploadComplete('u-1');
+
+    expect(seen['path']).toBe('/files/uploads/u-1/complete');
+    expect(seen['method']).toBe('POST');
+    expect(reply).toEqual({ size: 12, sha256: 'ff'.repeat(32) });
+  });
+
+  it('does not retry a 500: a blind retry double-submits', async () => {
+    const send = vi.fn(async () => jsonResponse({ error: 'boom' }, 500));
+    const gateway = new ExecutorGateway(send);
+
+    await expect(gateway.filesUploadComplete('u-1')).rejects.toBeInstanceOf(SandboxServiceError);
+
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('carries the 409 ranges in the error body: the resume signal', async () => {
+    const send = vi.fn(async () =>
+      jsonResponse(
+        { error: '1 range(s) of the upload are still missing', ranges: [{ start: 4, end: 8 }] },
+        409,
+      ),
+    );
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesUploadComplete('u-1').catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxRequestError);
+    expect((error as SandboxRequestError).status_code).toBe(409);
+    expect((error as SandboxRequestError).body).toEqual({
+      error: '1 range(s) of the upload are still missing',
+      ranges: [{ start: 4, end: 8 }],
+    });
+  });
+});
+
+describe('files_upload_abort', () => {
+  it('deletes the session', async () => {
+    const seen: Record<string, unknown> = {};
+    const send = vi.fn(async (path: string, init: RequestInit) => {
+      seen['path'] = path;
+      seen['method'] = init.method;
+      return new Response(null, { status: 204 });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    await gateway.filesUploadAbort('u-1');
+
+    expect(seen['path']).toBe('/files/uploads/u-1');
+    expect(seen['method']).toBe('DELETE');
+  });
+});
+
+describe('files_read_range', () => {
+  it('returns the status, the etag and the streamed body', async () => {
+    const seen: Record<string, unknown> = {};
+    const send = vi.fn(async (path: string, init: RequestInit) => {
+      seen['path'] = path;
+      seen['method'] = init.method;
+      seen['range'] = new Headers(init.headers).get('Range');
+      return new Response(streamOfChunks([new TextEncoder().encode('ab'), new TextEncoder().encode('cdef')]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream', ETag: '"c-1b"' },
+      });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const reply = await gateway.filesReadRange('/tmp/a.txt');
+
+    expect(seen['path']).toBe('/files?path=%2Ftmp%2Fa.txt');
+    expect(seen['method']).toBe('GET');
+    expect(seen['range']).toBeNull();
+    expect(reply.status).toBe(200);
+    expect(reply.etag).toBe('"c-1b"');
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of reply.stream) chunks.push(chunk);
+    expect(chunks.map((c) => new TextDecoder().decode(c)).join('')).toBe('abcdef');
+  });
+
+  it('sends Range and If-Range for a resume', async () => {
+    const seen: Record<string, unknown> = {};
+    const send = vi.fn(async (_path: string, init: RequestInit) => {
+      seen['range'] = new Headers(init.headers).get('Range');
+      seen['ifRange'] = new Headers(init.headers).get('If-Range');
+      return new Response(streamOfChunks([new TextEncoder().encode('cdef')]), {
+        status: 206,
+        headers: { 'Content-Type': 'application/octet-stream', ETag: '"c-1b"' },
+      });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const reply = await gateway.filesReadRange('/tmp/a.txt', { range: 'bytes=2-', ifRange: '"c-1b"' });
+
+    expect(seen['range']).toBe('bytes=2-');
+    expect(seen['ifRange']).toBe('"c-1b"');
+    expect(reply.status).toBe(206);
+    expect(reply.etag).toBe('"c-1b"');
+  });
+
+  it('maps 404 to SandboxRequestError', async () => {
+    const send = vi.fn(async () => jsonResponse({ error: 'file does not exist' }, 404));
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesReadRange('/tmp/missing.txt').catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxRequestError);
+    expect((error as SandboxRequestError).status_code).toBe(404);
   });
 });
 

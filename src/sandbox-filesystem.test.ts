@@ -864,6 +864,21 @@ async function tempDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'st136-'));
 }
 
+/** Drive the faked clock until pending settles, yielding real macrotask
+ *  turns: the download's fs IO rides the real threadpool, which outlasts
+ *  any fixed turn count on slow runners — so the bound is wall time
+ *  (performance.now is never faked here), and the loop paces with real IO. */
+async function driveFakeClock(pending: Promise<unknown>): Promise<unknown> {
+  const deadline = performance.now() + 10_000;
+  for (;;) {
+    await vi.advanceTimersByTimeAsync(1_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    const error = await Promise.race([pending, 'unsettled']);
+    if (error !== 'unsettled') return error;
+    if (performance.now() > deadline) return 'unsettled';
+  }
+}
+
 describe('upload defaults', () => {
   it('pins the documented defaults', () => {
     expect(UPLOAD_PART_SIZE).toBe(50 * 1024 * 1024);
@@ -1675,14 +1690,7 @@ describe('download_file resume', () => {
 
     try {
       const pending = fsOf(port).download_file('/remote.bin', target).catch((e: unknown) => e);
-      // Drive the fake clock until the budget is spent: each iteration also
-      // yields a real macrotask turn so the chain's fs IO can complete.
-      let error: unknown = 'unsettled';
-      for (let i = 0; i < 32 && error === 'unsettled'; i++) {
-        await vi.advanceTimersByTimeAsync(1_000);
-        await new Promise((resolve) => setImmediate(resolve));
-        error = await Promise.race([pending, 'unsettled']);
-      }
+      const error = await driveFakeClock(pending);
 
       expect(error).toBeInstanceOf(SandboxFilesystemError);
       expect((error as Error).message).toContain('socket hang up');
@@ -1734,12 +1742,7 @@ describe('download_file resume', () => {
 
     try {
       const pending = fsOf(port).download_file('/remote.bin', target).catch((e: unknown) => e);
-      let error: unknown = 'unsettled';
-      for (let i = 0; i < 32 && error === 'unsettled'; i++) {
-        await vi.advanceTimersByTimeAsync(1_000);
-        await new Promise((resolve) => setImmediate(resolve));
-        error = await Promise.race([pending, 'unsettled']);
-      }
+      const error = await driveFakeClock(pending);
 
       expect(error).toBeInstanceOf(SandboxFilesystemError);
       expect((error as Error).message).toContain('socket hang up');
@@ -1767,12 +1770,7 @@ describe('download_file resume', () => {
 
     try {
       const pending = fsOf(port).download_file('/proc/cpuinfo', target).catch((e: unknown) => e);
-      let error: unknown = 'unsettled';
-      for (let i = 0; i < 32 && error === 'unsettled'; i++) {
-        await vi.advanceTimersByTimeAsync(1_000);
-        await new Promise((resolve) => setImmediate(resolve));
-        error = await Promise.race([pending, 'unsettled']);
-      }
+      const error = await driveFakeClock(pending);
 
       // Each attempt lands bytes, but the validator-less restart discards
       // them: no net progress, so the budget must spend and surface — the

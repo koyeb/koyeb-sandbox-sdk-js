@@ -768,6 +768,26 @@ describe('buildArchive and extractArchive', () => {
     });
   });
 
+  it('normalizes inner .. members instead of refusing them', async () => {
+    await withTmpDir(async (root) => {
+      const dst = join(root, 'dst');
+      await mkdir(dst);
+      const archive = await rawArchive(root, 'a/../b.txt', 'hi');
+      const extracted = await extractArchive(archive, dst);
+      expect(extracted).toEqual(['b.txt']);
+      expect(await readFile(join(dst, 'b.txt'), 'utf-8')).toBe('hi');
+    });
+  });
+
+  it('refuses members whose .. chain escapes after normalization', async () => {
+    await withTmpDir(async (root) => {
+      const dst = join(root, 'dst');
+      await mkdir(dst);
+      const archive = await rawArchive(root, 'a/../../x.txt', 'hi');
+      await expect(extractArchive(archive, dst)).rejects.toThrow(/outside/i);
+    });
+  });
+
   it('refuses absolute members', async () => {
     await withTmpDir(async (root) => {
       const dst = join(root, 'dst');

@@ -291,6 +291,22 @@ describe('UstarReader', () => {
     expect(members[0]).toMatchObject({ name: 'a.txt', mtime: 1730123456.5 });
   });
 
+  it('applies a PAX size record over the header field', async () => {
+    const pax = '10 size=7\n';
+    const paxBytes = padded(encoder.encode(pax));
+    const paxHeader = rawHeader({
+      name: 'PaxHeader',
+      typeflag: 'x',
+      size: paxBytes.length.toString(8).padStart(11, '0') + '\0',
+    });
+    const memberHeader = rawHeader({ name: 'b.txt', typeflag: '0', size: '00000000000\0' });
+    const content = padded(encoder.encode('seven!!'));
+    const bytes = await rawArchive([paxHeader, paxBytes, memberHeader, content, ustarTrailer()]);
+    const members = await readMembers(bytes);
+    expect(members[0]).toMatchObject({ name: 'b.txt', size: 7 });
+    expect(members[0].content).toEqual(encoder.encode('seven!!'));
+  });
+
   it('applies PAX global records to every following member', async () => {
     const pax = '16 linkpath=tgt\n';
     const paxBytes = padded(encoder.encode(pax));

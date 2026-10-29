@@ -25,6 +25,20 @@ export type FileStatEntry = {
   sha256?: string;
 };
 
+/** One /files/list NDJSON entry: a FileStatEntry with a relative path —
+ *  unreadable entries carry `error` and the listing goes on. */
+export type FileListEntry = {
+  path: string;
+  type: string;
+  size: number;
+  mode: string;
+  mtime: string;
+  error?: string;
+};
+
+/** The PUT /files/archive reply: extracted regular files and content bytes. */
+export type FilesArchivePutReply = { files: number; bytes: number };
+
 /** The PUT /files commit reply: the received size and the content digest. */
 export type FilesPutReply = { size: number; sha256: string };
 
@@ -83,6 +97,20 @@ function probeVerdict(status: number): boolean {
 function raiseForFilesStatus(status: number, text: string): SandboxRequestError | SandboxServiceError {
   if (status >= 500) return new SandboxServiceError(status, text);
   return new SandboxRequestError(status, text);
+}
+
+/** One NDJSON line as a list entry; garbage fails the listing loud. */
+function parseListLine(line: string): FileListEntry {
+  let entry: unknown;
+  try {
+    entry = JSON.parse(line);
+  } catch {
+    throw new Error(`malformed /files/list entry: ${line}`);
+  }
+  if (typeof (entry as FileListEntry)?.path !== 'string') {
+    throw new Error(`malformed /files/list entry: ${line}`);
+  }
+  return entry as FileListEntry;
 }
 
 /** Reject `promise` with `reason()` the moment `signal` aborts. */
@@ -300,11 +328,16 @@ export class ExecutorGateway {
    * Stat a file on the streamed /files routes (executor v0.0.24+).
    *
    * A small JSON GET: it keeps the retrying path and the 30 s total cap of
-   * every other JSON route. The fs layer classifies status errors.
+   * every other JSON route. The fs layer classifies status errors. With
+   * `hash: 'sha256'` the reply carries the file's digest (the sync
+   * checksum arm's stat?hash=sha256).
    */
-  async filesStat(path: string): Promise<FileStatEntry> {
+  async filesStat(path: string, options: { hash?: 'sha256'; signal?: AbortSignal } = {}): Promise<FileStatEntry> {
     const params = new URLSearchParams({ path });
-    return this.post<FileStatEntry>(`/files/stat?${params}`, { method: 'GET' });
+    if (options.hash !== undefined) {
+      params.set('hash', options.hash);
+    }
+    return this.post<FileStatEntry>(`/files/stat?${params}`, { method: 'GET', signal: options.signal });
   }
 
   /**
@@ -460,6 +493,185 @@ export class ExecutorGateway {
       if (!completed) {
         body.cancel().catch(() => {});
       }
+    }
+  }
+
+  /**
+   * Stream a directory listing from GET /files/list (executor v0.0.24+),
+   * entry by entry.
+   *
+   * One JSON object per line, yielded as the walk goes: a large tree is never
+   * held in memory. An entry the executor could not read carries an `error`
+   * field and the listing goes on. One non-retrying request bounded by the
+   * 60 s idle clock, like every streamed /files route; a malformed line
+   * fails the listing loud.
+   */
+  async *filesList(
+    path: string,
+    options: { recursive?: boolean; signal?: AbortSignal } = {},
+  ): AsyncGenerator<FileListEntry, void, unknown> {
+    const params = new URLSearchParams({ path });
+    if (options.recursive) {
+      params.set('recursive', '1');
+    }
+
+    const idle = new IdleTimeout(DEFAULT_FILES_IDLE_TIMEOUT, this.options.name ?? 'sandbox');
+    idle.attach(options.signal);
+
+    let response: Response;
+    try {
+      response = await raceAbort(
+        this.send(`/files/list?${params}`, { method: 'GET', signal: idle.signal }),
+        idle.signal,
+        () => idle.abortReason(),
+      );
+    } catch (error) {
+      idle.dispose();
+      throw idle.classify(error);
+    }
+
+    if (!response.ok) {
+      idle.dispose();
+      const text = await response.text();
+      throw raiseForFilesStatus(response.status, text);
+    }
+
+    const body = response.body;
+    if (!body) {
+      idle.dispose();
+      return;
+    }
+
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = '';
+    let completed = false;
+    try {
+      idle.touch(); // headers arrived: the idle window starts over
+      for (;;) {
+        const { done, value } = await raceAbort(reader.read(), idle.signal, () => idle.abortReason());
+        if (done) {
+          completed = true;
+          break;
+        }
+        // The clock bounds pending reads, not the consumer's processing time:
+        // suspended at yield no read is pending.
+        idle.clear();
+        buffered += decoder.decode(value, { stream: true });
+        const lines = buffered.split('\n');
+        buffered = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.trim() !== '') yield parseListLine(line);
+        }
+        idle.touch();
+      }
+      // The executor ends every entry with a newline, but a body cut without
+      // one still yields its last complete line.
+      if (buffered.trim() !== '') {
+        yield parseListLine(buffered);
+      }
+    } catch (error) {
+      throw idle.classify(error);
+    } finally {
+      idle.dispose();
+      if (!completed) {
+        body.cancel().catch(() => {});
+      }
+    }
+  }
+
+  /**
+   * Stream a directory as a gzip'd tar from GET /files/archive
+   * (executor v0.0.24+), chunk by chunk.
+   *
+   * The root itself is not an entry; symlinks are archived as links and
+   * special files are skipped. Exclude patterns match any suffix of a
+   * relative path at a `/` boundary, as `tar --exclude` does; a matching
+   * directory is skipped whole. One non-retrying request bounded by the
+   * 60 s idle clock.
+   */
+  async *filesArchiveGet(
+    path: string,
+    options: { exclude?: string[]; signal?: AbortSignal } = {},
+  ): AsyncGenerator<Uint8Array, void, unknown> {
+    const params = new URLSearchParams({ path });
+    for (const pattern of options.exclude ?? []) {
+      params.append('exclude', pattern);
+    }
+
+    const idle = new IdleTimeout(DEFAULT_FILES_IDLE_TIMEOUT, this.options.name ?? 'sandbox');
+    idle.attach(options.signal);
+
+    let response: Response;
+    try {
+      response = await raceAbort(
+        this.send(`/files/archive?${params}`, { method: 'GET', signal: idle.signal }),
+        idle.signal,
+        () => idle.abortReason(),
+      );
+    } catch (error) {
+      idle.dispose();
+      throw idle.classify(error);
+    }
+
+    if (!response.ok) {
+      idle.dispose();
+      const text = await response.text();
+      throw raiseForFilesStatus(response.status, text);
+    }
+
+    yield* this.pumpFilesBody(response, idle);
+  }
+
+  /**
+   * Extract a gzip'd tar into the directory at path (executor v0.0.24+).
+   *
+   * The executor creates the directory when missing and refuses members
+   * that escape it (absolute paths, `..`, links leaving the root). One
+   * non-retrying request, like every streamed PUT: a consumed body cannot
+   * replay, and the executor leaves already-extracted members in place when
+   * a stream ends short. The timeout bounds idle time (60 s).
+   */
+  async filesArchivePut(
+    path: string,
+    content: FilesPutContent,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<FilesArchivePutReply> {
+    const params = new URLSearchParams({ path });
+    const headers = new Headers({ 'Content-Type': 'application/octet-stream' });
+
+    const idle = new IdleTimeout(DEFAULT_FILES_IDLE_TIMEOUT, this.options.name ?? 'sandbox');
+    idle.attach(options.signal);
+
+    try {
+      const { body, duplex } = await this.putBody(content, idle);
+      const init: StreamedRequestInit = {
+        method: 'PUT',
+        headers,
+        signal: idle.signal,
+        body: body as BodyInit,
+      };
+      if (duplex) {
+        init.duplex = duplex;
+      }
+
+      const response = await raceAbort(this.send(`/files/archive?${params}`, init), idle.signal, () => idle.abortReason());
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw raiseForFilesStatus(response.status, text);
+      }
+
+      const reply = (await response.json()) as FilesArchivePutReply;
+      if (typeof reply?.files !== 'number' || typeof reply?.bytes !== 'number') {
+        // A 200 without the counts would surface as a false success.
+        throw new Error('malformed /files/archive reply');
+      }
+      return reply;
+    } catch (error) {
+      throw idle.classify(error);
+    } finally {
+      idle.dispose();
     }
   }
 

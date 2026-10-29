@@ -40,6 +40,8 @@ export {
   type FileStat,
   type ReadFileEncoding,
   type ReadFileOptions,
+  type SyncOptions,
+  type SyncResult,
   type TransferOptions,
   type TransferProgress,
   type WriteFileOptions,

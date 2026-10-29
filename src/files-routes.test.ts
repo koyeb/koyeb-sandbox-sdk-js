@@ -835,3 +835,311 @@ describe('files route timeouts', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('files_stat hash', () => {
+  it('requests the sha256 digest beside the entry', async () => {
+    const send = vi.fn(async (_path: string) =>
+      jsonResponse({ type: 'file', size: 5, mode: '0644', mtime: '2026-10-27T10:00:00Z', sha256: 'deadbeef' }),
+    );
+    const gateway = new ExecutorGateway(send);
+
+    const entry = await gateway.filesStat('/tmp/a.txt', { hash: 'sha256' });
+
+    expect(send.mock.calls[0][0]).toBe('/files/stat?path=%2Ftmp%2Fa.txt&hash=sha256');
+    expect(entry.sha256).toBe('deadbeef');
+  });
+
+  it('omits the hash param by default', async () => {
+    const send = vi.fn(async (_path: string) => jsonResponse({ type: 'file', size: 5, mode: '0644', mtime: 't' }));
+    const gateway = new ExecutorGateway(send);
+
+    await gateway.filesStat('/tmp/a.txt');
+
+    expect(send.mock.calls[0][0]).toBe('/files/stat?path=%2Ftmp%2Fa.txt');
+  });
+});
+
+describe('files_list', () => {
+  function ndjsonResponse(lines: string[], status = 200) {
+    return new Response(lines.join('\n') + '\n', {
+      status,
+      headers: { 'Content-Type': 'application/x-ndjson' },
+    });
+  }
+
+  it('streams NDJSON entries with the recursive flag', async () => {
+    const send = vi.fn(async (_path: string, _init: RequestInit) =>
+      ndjsonResponse([
+        '{"path": "a.txt", "type": "file", "size": 3, "mode": "0644", "mtime": "2026-10-27T10:00:00Z"}',
+        '{"path": "sub", "type": "dir", "size": 0, "mode": "0755", "mtime": "2026-10-27T10:00:00Z"}',
+      ]),
+    );
+    const gateway = new ExecutorGateway(send);
+
+    const entries = [];
+    for await (const entry of gateway.filesList('/tmp', { recursive: true })) entries.push(entry);
+
+    expect(send.mock.calls[0][0]).toBe('/files/list?path=%2Ftmp&recursive=1');
+    expect(send.mock.calls[0][1].method).toBe('GET');
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ path: 'a.txt', type: 'file', size: 3 });
+    expect(entries[1]).toMatchObject({ path: 'sub', type: 'dir' });
+  });
+
+  it('omits recursive by default', async () => {
+    const send = vi.fn(async (_path: string) => ndjsonResponse([]));
+    const gateway = new ExecutorGateway(send);
+
+    for await (const _entry of gateway.filesList('/tmp')) void _entry;
+
+    expect(send.mock.calls[0][0]).toBe('/files/list?path=%2Ftmp');
+  });
+
+  it('passes error entries through: the listing goes on', async () => {
+    const send = vi.fn(async () =>
+      ndjsonResponse([
+        '{"path": "a.txt", "type": "file", "size": 3, "mode": "0644", "mtime": "2026-10-27T10:00:00Z"}',
+        '{"path": "b.txt", "error": "permission denied"}',
+      ]),
+    );
+    const gateway = new ExecutorGateway(send);
+
+    const entries = [];
+    for await (const entry of gateway.filesList('/tmp')) entries.push(entry);
+
+    expect(entries).toHaveLength(2);
+    expect(entries[1]).toEqual({ path: 'b.txt', error: 'permission denied' });
+  });
+
+  it('parses lines split across chunk boundaries', async () => {
+    const lines = [
+      '{"path": "a.txt", "type": "file", "size": 3, "mode": "0644", "mtime": "t"}',
+      '{"path": "sub", "type": "dir", "size": 0, "mode": "0755", "mtime": "t"}',
+    ];
+    const whole = new TextEncoder().encode(lines.join('\n') + '\n');
+    const send = vi.fn(async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            // One byte at a time: every boundary position gets exercised.
+            for (let i = 0; i < whole.length; i++) controller.enqueue(whole.subarray(i, i + 1));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/x-ndjson' } },
+      ),
+    );
+    const gateway = new ExecutorGateway(send);
+
+    const paths = [];
+    for await (const entry of gateway.filesList('/tmp')) paths.push(entry.path);
+
+    expect(paths).toEqual(['a.txt', 'sub']);
+  });
+
+  it('maps 404 to SandboxRequestError', async () => {
+    const send = vi.fn(async (_path: string) => jsonResponse({ error: 'no such file or directory' }, 404));
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesList('/tmp/missing').next().catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SandboxRequestError);
+    expect((error as SandboxRequestError).status_code).toBe(404);
+  });
+
+  it('fails loud on a malformed line', async () => {
+    const send = vi.fn(async () => ndjsonResponse(['{"path": "a.txt"']));
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesList('/tmp').next().catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/malformed \/files\/list entry/);
+  });
+
+  it('bounds idle time: a stalled body names the 60s bound', async () => {
+    vi.useFakeTimers();
+    const send = vi.fn(async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"path": "a.txt"}\n'));
+          // never closes, never enqueues again
+        },
+      });
+      return new Response(body, { status: 200, headers: { 'Content-Type': 'application/x-ndjson' } });
+    });
+    const gateway = new ExecutorGateway(send, { name: 'sbx' });
+
+    const stream = gateway.filesList('/tmp');
+    const first = await stream.next();
+    expect(first.done).toBe(false);
+
+    const errorPromise = stream.next().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const error = await errorPromise;
+
+    expect(error).toBeInstanceOf(SandboxTimeoutError);
+    expect((error as Error).message).toBe('Request timed out after 60s');
+  });
+});
+
+describe('files_archive_get', () => {
+  it('streams the archive bytes with repeated exclude params', async () => {
+    const seen: Record<string, unknown> = {};
+    const send = vi.fn(async (path: string, init: RequestInit) => {
+      seen['path'] = path;
+      seen['method'] = init.method;
+      return new Response(new Uint8Array([0x1f, 0x8b, 1, 2]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/gzip' },
+      });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const chunks = [];
+    for await (const chunk of gateway.filesArchiveGet('/tmp', { exclude: ['*.log', '.git'] })) {
+      chunks.push(chunk);
+    }
+
+    // URLSearchParams leaves '*' unescaped (x-www-form-urlencoded keeps it
+    // literal); the executor decodes both spellings identically.
+    expect(seen['path']).toBe('/files/archive?path=%2Ftmp&exclude=*.log&exclude=.git');
+    expect(seen['method']).toBe('GET');
+    expect(chunks.reduce((n, c) => n + c.byteLength, 0)).toBe(4);
+  });
+
+  it('omits the exclude param when none given', async () => {
+    const send = vi.fn(async (_path: string) => new Response(new Uint8Array(0), { status: 200 }));
+    const gateway = new ExecutorGateway(send);
+
+    for await (const _chunk of gateway.filesArchiveGet('/tmp')) void _chunk;
+
+    expect(send.mock.calls[0][0]).toBe('/files/archive?path=%2Ftmp');
+  });
+
+  it('maps 400 on a bad pattern to SandboxRequestError', async () => {
+    const send = vi.fn(async (_path: string) => jsonResponse({ error: 'bad exclude pattern "["' }, 400));
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesArchiveGet('/tmp', { exclude: ['['] }).next().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(SandboxRequestError);
+    expect((error as SandboxRequestError).status_code).toBe(400);
+  });
+
+  it('bounds idle time: a stalled body names the 60s bound', async () => {
+    vi.useFakeTimers();
+    const send = vi.fn(async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([0x1f, 0x8b]));
+        },
+      });
+      return new Response(body, { status: 200, headers: { 'Content-Type': 'application/gzip' } });
+    });
+    const gateway = new ExecutorGateway(send, { name: 'sbx' });
+
+    const stream = gateway.filesArchiveGet('/tmp');
+    await stream.next();
+
+    const errorPromise = stream.next().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const error = await errorPromise;
+
+    expect(error).toBeInstanceOf(SandboxTimeoutError);
+    expect((error as Error).message).toBe('Request timed out after 60s');
+  });
+});
+
+describe('files_archive_put', () => {
+  it('streams the body and returns the counts', async () => {
+    const seen: Record<string, unknown> = {};
+    const send = vi.fn(async (path: string, init: RequestInit) => {
+      seen['path'] = path;
+      seen['method'] = init.method;
+      seen['contentType'] = new Headers(init.headers).get('Content-Type');
+      seen['body'] = await readBody(init);
+      return jsonResponse({ files: 2, bytes: 10 });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const reply = await gateway.filesArchivePut('/tmp', new TextEncoder().encode('tar-bytes'));
+
+    expect(seen['path']).toBe('/files/archive?path=%2Ftmp');
+    expect(seen['method']).toBe('PUT');
+    expect(seen['contentType']).toBe('application/octet-stream');
+    expect(new TextDecoder().decode(seen['body'] as Uint8Array)).toBe('tar-bytes');
+    expect(reply).toEqual({ files: 2, bytes: 10 });
+  });
+
+  it('accepts stream content: the fs layer spools batches to disk', async () => {
+    const send = vi.fn(async (_path: string, init: RequestInit) => {
+      expect(init.body).toBeInstanceOf(ReadableStream);
+      expect((init as { duplex?: string }).duplex).toBe('half');
+      return jsonResponse({ files: 0, bytes: 0 });
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const reply = await gateway.filesArchivePut('/tmp', streamOfChunks([new TextEncoder().encode('tar-'), new TextEncoder().encode('bytes')]));
+
+    expect(reply).toEqual({ files: 0, bytes: 0 });
+  });
+
+  it('refuses a malformed reply: counts must be numbers', async () => {
+    const send = vi.fn(async () => jsonResponse({ files: 'two' }));
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesArchivePut('/tmp', new Uint8Array(0)).catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/malformed \/files\/archive reply/);
+  });
+
+  it('maps 400 on bad gzip to SandboxRequestError', async () => {
+    const send = vi.fn(async () =>
+      jsonResponse({ error: 'reading gzip stream: gzip: invalid header' }, 400),
+    );
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesArchivePut('/tmp', new TextEncoder().encode('not-gzip')).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(SandboxRequestError);
+    expect((error as SandboxRequestError).status_code).toBe(400);
+  });
+
+  it('a mid-stream failure is never retried: the body cannot replay', async () => {
+    const send = vi.fn(async () => {
+      throw new TypeError('socket hang up');
+    });
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesArchivePut('/tmp', new TextEncoder().encode('tar-bytes')).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(TypeError);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('a 5xx is not blindly retried', async () => {
+    const send = vi.fn(async () => jsonResponse({ error: 'bad gateway' }, 502));
+    const gateway = new ExecutorGateway(send);
+
+    const error = await gateway.filesArchivePut('/tmp', new TextEncoder().encode('tar-bytes')).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(SandboxServiceError);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds idle time: names the 60s bound', async () => {
+    vi.useFakeTimers();
+    const send = hangingSend();
+    const gateway = new ExecutorGateway(send, { name: 'sbx' });
+
+    const pending = gateway.filesArchivePut('/tmp', new TextEncoder().encode('tar-bytes'));
+    const errorPromise = pending.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const error = await errorPromise;
+
+    expect(error).toBeInstanceOf(SandboxTimeoutError);
+    expect((error as Error).message).toBe('Request timed out after 60s');
+  });
+});

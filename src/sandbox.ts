@@ -26,7 +26,9 @@ import { resolveClient } from './credentials.js';
 import { CommandRunner } from './command-runner.js';
 import {
   ExecutorGateway,
+  type FileListEntry,
   type FileStatEntry,
+  type FilesArchivePutReply,
   type FilesPutContent,
   type FilesPutOptions,
   type FilesPutReply,
@@ -831,9 +833,10 @@ export class Sandbox {
     return this.gateway.hasFilesRoutes();
   }
 
-  /** Stat a file on the streamed /files routes (executor v0.0.24+). */
-  filesStat(path: string): Promise<FileStatEntry> {
-    return this.gateway.filesStat(path);
+  /** Stat a file on the streamed /files routes (executor v0.0.24+); with
+   *  hash: 'sha256' the reply carries the file's digest. */
+  filesStat(path: string, options?: { hash?: 'sha256'; signal?: AbortSignal }): Promise<FileStatEntry> {
+    return this.gateway.filesStat(path, options);
   }
 
   /** Stream content to a file through PUT /files (executor v0.0.24+), one non-retrying request. */
@@ -844,6 +847,33 @@ export class Sandbox {
   /** Stream a file's bytes from GET /files (executor v0.0.24+), chunk by chunk. */
   filesRead(path: string, options?: { signal?: AbortSignal }): AsyncGenerator<Uint8Array, void, unknown> {
     return this.gateway.filesRead(path, options);
+  }
+
+  /** Stream a directory listing from GET /files/list (executor v0.0.24+),
+   *  entry by entry — one JSON object per line, errors carried per entry. */
+  filesList(
+    path: string,
+    options?: { recursive?: boolean; signal?: AbortSignal },
+  ): AsyncGenerator<FileListEntry, void, unknown> {
+    return this.gateway.filesList(path, options);
+  }
+
+  /** Stream a directory as a gzip'd tar from GET /files/archive
+   *  (executor v0.0.24+), chunk by chunk. */
+  filesArchiveGet(
+    path: string,
+    options?: { exclude?: string[]; signal?: AbortSignal },
+  ): AsyncGenerator<Uint8Array, void, unknown> {
+    return this.gateway.filesArchiveGet(path, options);
+  }
+
+  /** Extract a gzip'd tar into the directory at path (executor v0.0.24+). */
+  filesArchivePut(
+    path: string,
+    content: FilesPutContent,
+    options?: { signal?: AbortSignal },
+  ): Promise<FilesArchivePutReply> {
+    return this.gateway.filesArchivePut(path, content, options);
   }
 
   /** GET /files with the resume headers (executor v0.0.24+): the reply's

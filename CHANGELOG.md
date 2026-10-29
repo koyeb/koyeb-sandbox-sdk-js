@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+### Directory sync + snapshot copy on the archive routes (ST-137)
+
+`filesystem.sync(localPath, remotePath?, options)` mirrors a directory between the local
+machine and the sandbox, one way — `rsync -r` without deltas. Both sides are listed (a
+local walk against the executor's NDJSON `GET /files/list`) and diffed on path, type,
+size and whole-second mtime; `checksum: true` adds a sha256 comparison. The changed set
+travels as ~50 MiB gzip'd tar batches through `PUT /files/archive` (spooled per batch,
+flat memory) — a pull streams `GET /files/archive` and extracts only the changed set.
+Files larger than one batch ride the multipart `upload_file` / resumable `download_file`
+(ST-136). `delete: true` prunes destination extras topmost-first via the legacy routes;
+`exclude` follows the executor's `tar --exclude` semantics; `dry_run` computes without
+touching either side; a no-op sync sends nothing beyond the listing. Requires executor
+v0.0.24+.
+
+```ts
+const result = await sandbox.filesystem.sync('./site', 'site', {
+  direction: 'push',
+  delete: true,
+  exclude: ['node_modules'],
+});
+// { uploaded: 42, deleted: 3, skipped: 117, bytes: 1_048_576 }
+```
+
+- New executor-route transports on the Sandbox surface beside the fs operations:
+  `filesList(path, { recursive, signal })` (NDJSON, one entry per line, error entries
+  pass through), `filesArchiveGet(path, { exclude, signal })` (streamed gzip'd tar),
+  `filesArchivePut(path, content, { signal })` (→ `{ files, bytes }`, never retried —
+  a consumed stream cannot replay), and `filesStat` grows `hash: 'sha256'`
+- `DeclarativeSnapshot.copy()` of a directory now travels as **one archive push**
+  (`filesystem.sync`) on executors v0.0.24+ — binary-safe, modes/mtimes/symlinks kept;
+  the legacy walk read files as **text** and lost all three. Single files ride the
+  streamed `upload_file`. Old executors keep the per-file legacy walk, byte-for-byte
+- The tar batches ride a minimal in-house ustar writer (`src/ustar.ts`): POSIX ustar
+  headers with prefix-split long names, GNU `L`/`K` extensions beyond, PAX-aware
+  reader for the executor's Go archives. The SDK keeps **zero runtime dependencies**
+  (gzip is `node:zlib`)
+- Python parity: `koyeb/koyeb-python-sdk` PR #107 (`files-sync`) — same engine rules
+  (whole-second mtimes, unarchivable pairs never deleted, excluded directories pruned
+  whole, already-gone deletes tolerated and counted, oversized files' bytes never
+  travel twice). Divergences: an invalid `direction` raises `SandboxFilesystemError`
+  (Python: `ValueError`), and the options are one object with an `AbortSignal` seam
+  (Python has no cancellation)
+
 ### ⚠️ Breaking change: `read_file` returns the content (ST-135, KOYEB-6699)
 
 `read_file(path, { encoding })` now returns the file content directly — a `string` for

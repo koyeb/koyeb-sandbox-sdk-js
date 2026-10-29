@@ -305,6 +305,7 @@ Access via `sandbox.filesystem`. On executors v0.0.24+ the byte-moving operation
 | `is_dir(path)`                         | Return `true` if the path is a directory.             |
 | `upload_file(localPath, remotePath, options?)`  | Stream a local file to the sandbox: `progress(done, total)` at most every 100 ms, `signal` honored mid-flight, sha256 verified end to end. Above `options.part_size` (default 50 MiB, capped by the executor's 100 MiB) the file uploads as a multipart session — `options.concurrency` parts in flight (default 4, memory = `part_size × concurrency`), timed-out parts split, missing ranges refilled from complete's 409. Legacy-only `options.encoding` picks the transport: `'utf-8'` (default) or `'base64'` (binary). |
 | `download_file(remotePath, localPath, options?)` | Stream a sandbox file to disk into `<local>.part`, renamed into place on success — resuming by default after a network error with `Range` + `If-Range` on the executor's strong ETag (received bytes are never re-sent; a file that changed restarts clean). Same options as the upload. |
+| `sync(localPath, remotePath?, options?)` | One-way directory sync, like `rsync -r` without deltas (executor v0.0.24+). See [Directory sync](#directory-sync) below. |
 
 > **Warning — breaking change:** `download_file` takes `(remotePath, localPath)`,
 > matching the Python SDK and the CLI, and `read_file` returns the content directly —
@@ -323,6 +324,43 @@ Access via `sandbox.filesystem`. On executors v0.0.24+ the byte-moving operation
 > await sandbox.filesystem.download_file(remotePath, localPath);
 > const text = await sandbox.filesystem.read_file('/data/x'); // 'hello'
 > ```
+
+### Directory sync
+
+`sync(localPath, remotePath?, options?)` mirrors a directory between the local
+machine and the sandbox, one way — `rsync -r` without deltas:
+
+- `direction: 'push'` (the default) copies local → sandbox; `'pull'` copies sandbox → local
+- Both sides are listed and diffed on path, type, size and mtime (whole seconds,
+  like rsync's default); `checksum: true` adds a sha256 comparison for files that
+  pass that test
+- The changed set travels as ~50 MiB gzip'd tar batches through
+  `PUT /files/archive` (spooled per batch, so memory stays flat); a pull streams
+  `GET /files/archive` and extracts only the changed set. Files larger than one
+  batch ride `upload_file`/`download_file` (multipart, resumable) — a pull's archive
+  leaves them out so their bytes travel once
+- `delete: true` prunes destination entries the source lacks (topmost first, a
+  directory counts as one deletion); `exclude: ['*.log', '.git']` follows the
+  executor's `tar --exclude` semantics — a matching path or any `/`-separated
+  suffix of it is skipped, a matching directory whole. No default excludes
+- Symlinks travel as links, modes are kept, owners are not
+- `remotePath` defaults to the local path's relative form (its basename when
+  absolute), rsync-style; relative paths resolve under the sandbox workdir
+- A no-op sync sends nothing beyond the listing; `dry_run: true` computes the
+  plan without touching either side; `signal` aborts at the next transport call
+
+```ts
+// Push a local tree, pruning what the sandbox has that the source lacks
+const result = await sandbox.filesystem.sync('./site', 'site', { delete: true, exclude: ['node_modules'] });
+// { uploaded: 42, deleted: 3, skipped: 117, bytes: 1_048_576 }
+
+// Pull the sandbox's copy back, verifying content digests
+const back = await sandbox.filesystem.sync('./site', 'site', { direction: 'pull', checksum: true });
+// { downloaded: 0, deleted: 0, skipped: 162, bytes: 0 }
+```
+
+Requires executor v0.0.24+ (the streamed `/files` routes) — a legacy executor
+raises instead of silently transferring as text.
 
 ## Snapshots
 
@@ -358,6 +396,11 @@ const snapshot = await Sandbox.template('node-ci', 'node:22-slim', { workdir: '/
 
 const sandbox = await snapshot.spawn('runner');
 ```
+
+On executors v0.0.24+ a `copy()` of a directory travels as **one archive push**
+(`filesystem.sync`) — binary-safe, with modes, mtimes and symlinks kept — and a
+single file through the streamed `upload_file`. Older executors keep the
+legacy per-file walk.
 
 ## Error Types
 
@@ -410,6 +453,9 @@ TypeScript type.
 | Reply validation | Fails fast on malformed replies — missing `content`, bad stat shape, and a streamed PUT 200 without `sha256` | Tolerates missing fields (`response.get("content", "")`) | Documented divergence — garbage in fails loudly instead of reading as an empty file or a false corruption claim. |
 | Legacy write wire | Sends the base64 text with no `is_base64` flag, mirroring Python | `content` string only, no flag | Documented divergence — byte-exact round-trip through this SDK (`write_file` bytes → `read_file` `{encoding: 'base64'}`). |
 | Streamed connect phase | Bounds connect at the same 60 s as the rest of the transfer | `httpx.Timeout(…, connect=30)` caps connect at 30 s | Documented divergence — a dead connect fails 30 s later in JS. |
+| `sync()` options | One options object: `{ direction, delete, exclude, checksum, dry_run, signal }` — an `AbortSignal` is the JS cancellation seam | Keyword-only args: `direction=`, `delete=`, `exclude=`, `checksum=`, `dry_run=` — no signal | Documented divergence — same semantics, JS calling convention; Python's per-call `timeout=` overrides are not ported anywhere in this SDK. |
+| `sync()` invalid direction | Raises `SandboxFilesystemError` (the filesystem taxonomy) | Raises a plain `ValueError` | Documented divergence — JS keeps the filesystem taxonomy closed; callers catch one family. |
+| Snapshot `copy` binary safety | On v0.0.24+ directories ride one archive push (`filesystem.sync`); single files ride `upload_file` | Same routes and arms (ST-127) | Aligned — Python's legacy walk read files as text; both SDKs now keep bytes, modes, mtimes and symlinks on new executors, and both keep the legacy walk for old ones. |
 | Download stat validation | Requires the full stat shape at the download seam (fail-fast on garbage) | Reads only the `size` field | Documented divergence — the executor always returns the full shape. |
 | `open()` | Not implemented | `SandboxFileIO` file-like object | Documented divergence — `read_file`/`write_file`/`read_stream` cover the surface. |
 | Streamed PUT retry | Never retried: a stream cannot be replayed | Connect-time failures retry | Documented divergence — retry at the call site if a cold-start PUT fails. |

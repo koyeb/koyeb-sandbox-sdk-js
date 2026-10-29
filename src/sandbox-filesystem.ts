@@ -1,12 +1,23 @@
 import {
+  SandboxError,
   SandboxFileExistsError,
   SandboxFileNotFoundError,
   SandboxFilesystemError,
   SandboxRequestError,
   SandboxServiceError,
+  SandboxTimeoutError,
 } from './errors.js';
-import type { FileStatEntry, FilesPutContent, FilesPutOptions, FilesPutReply } from './executor-gateway.js';
-import { FILES_PROGRESS_INTERVAL_MS } from './constants.js';
+import type {
+  FileStatEntry,
+  FilesPutContent,
+  FilesPutOptions,
+  FilesPutReply,
+  FilesReadRangeReply,
+  FilesUploadCompleteReply,
+  FilesUploadSession,
+  FilesUploadStatus,
+} from './executor-gateway.js';
+import { FILES_PROGRESS_INTERVAL_MS, UPLOAD_CONCURRENCY, UPLOAD_PART_SIZE } from './constants.js';
 import { shellQuote } from './shell.js';
 
 /**
@@ -74,7 +85,122 @@ export type SandboxPort = {
   filesStat: (path: string) => Promise<FileStatEntry>;
   filesPut: (path: string, content: FilesPutContent, options?: FilesPutOptions) => Promise<FilesPutReply>;
   filesRead: (path: string, options?: { signal?: AbortSignal }) => AsyncGenerator<Uint8Array, void, unknown>;
+  filesReadRange: (
+    path: string,
+    options?: { range?: string; ifRange?: string; signal?: AbortSignal },
+  ) => Promise<FilesReadRangeReply>;
+  filesUploadOpen: (
+    path: string,
+    size: number,
+    options?: { mode?: string; sha256?: string; signal?: AbortSignal },
+  ) => Promise<FilesUploadSession>;
+  filesUploadPart: (
+    uploadId: string,
+    offset: number,
+    content: Uint8Array,
+    options?: { sha256?: string; signal?: AbortSignal },
+  ) => Promise<void>;
+  filesUploadStatus: (uploadId: string, options?: { signal?: AbortSignal }) => Promise<FilesUploadStatus>;
+  filesUploadComplete: (uploadId: string, options?: { signal?: AbortSignal }) => Promise<FilesUploadCompleteReply>;
+  filesUploadAbort: (uploadId: string, options?: { signal?: AbortSignal }) => Promise<void>;
 };
+
+// Multipart uploads: a part that times out is split in half rather than
+// failed — a smaller part needs less time on the wire. Below twice this floor
+// a split cannot help: the connection is stalling, not slow (Python parity).
+const MIN_SPLIT_SIZE = 1024 * 1024;
+
+// The executor's sessions live in memory: a restart or the 1 h idle expiry
+// loses them, and a 404 from a part or complete means starting over.
+const LOST_SESSION_MESSAGE =
+  'Upload session was lost — the executor restarted or the session expired; restart the upload';
+
+/** (offset, length) parts covering [start, end) in partSize slices. */
+function partPlan(start: number, end: number, partSize: number): Array<[number, number]> {
+  const plan: Array<[number, number]> = [];
+  for (let offset = start; offset < end; offset += partSize) {
+    plan.push([offset, Math.min(partSize, end - offset)]);
+  }
+  return plan;
+}
+
+/** A part's bytes and digest, read from disk at its offset.
+ *
+ * Read per attempt — no part bytes are buffered between retries, so memory
+ * holds at most one part per worker (Python parity: _read_part_with_digest).
+ */
+async function readPartWithDigest(path: string, offset: number, length: number): Promise<{ data: Uint8Array; digest: string }> {
+  const { open } = await import('node:fs/promises');
+  const { createHash } = await import('node:crypto');
+  const handle = await open(path, 'r');
+  try {
+    const buffer = new Uint8Array(length);
+    let read = 0;
+    while (read < length) {
+      const { bytesRead } = await handle.read(buffer, read, length - read, offset + read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    const data = read === length ? buffer : buffer.subarray(0, read);
+    return { data, digest: createHash('sha256').update(data).digest('hex') };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** The complete-409 body's missing spans, as [start, end) tuples.
+ *
+ * null means the body carried no usable ranges: the resume signal is absent
+ * and the failure is the caller's to report. The body arrives parsed (the
+ * JSON routes) or as text — both are read.
+ */
+function missingRangesFrom409(body: unknown): Array<[number, number]> | null {
+  const source = typeof body === 'string' ? tryJsonParse(body) : body;
+  const ranges = (source as { ranges?: unknown } | null)?.ranges;
+  if (!Array.isArray(ranges) || ranges.length === 0) return null;
+  const spans: Array<[number, number]> = [];
+  for (const range of ranges) {
+    const { start, end } = range as { start?: unknown; end?: unknown };
+    if (typeof start !== 'number' || !Number.isInteger(start)) return null;
+    if (typeof end !== 'number' || !Number.isInteger(end)) return null;
+    if (start < 0 || end <= start) return null;
+    spans.push([start, end]);
+  }
+  return spans;
+}
+
+/** Whether a failed part should be retried as smaller halves.
+ *
+ * The transport already retries transient network errors; what it never
+ * retries is a fired timeout — the idle bound (SandboxTimeoutError) or
+ * Cloudflare's origin cap (524, surfaced as SandboxServiceError after the
+ * transport's own retries). Those are the fs layer's to split: a smaller
+ * part needs less time on the wire.
+ */
+function splitWorthy(error: unknown): boolean {
+  if (error instanceof SandboxTimeoutError) return true;
+  return error instanceof SandboxServiceError && error.status_code === 524;
+}
+
+/** Byte counter across concurrent parts: progress(done, total) as they land. */
+class PartProgress {
+  private done = 0;
+
+  constructor(
+    private readonly reporter: ProgressReporter,
+    private readonly total: number,
+  ) {}
+
+  add(bytes: number): void {
+    // A 409-fill re-sends already-counted bytes; done never passes the file size.
+    this.done = Math.min(this.done + bytes, this.total);
+    this.reporter.update(this.done);
+  }
+
+  finish(): void {
+    this.reporter.finish(this.done);
+  }
+}
 
 // The executor reports failures as raw Go error strings ("no such file or
 // directory"); classify them with the Python SDK's human-phrase patterns.
@@ -158,6 +284,11 @@ function tryJsonParse(text: string): unknown {
   } catch {
     return null;
   }
+}
+
+/** An error body as the message should quote it: text stays text, objects stringify. */
+function formatErrorBody(body: unknown): string {
+  return typeof body === 'string' ? body : JSON.stringify(body);
 }
 
 /**
@@ -541,15 +672,23 @@ export class SandboxFilesystem {
    *
    * On executors v0.0.24+ the file streams from disk through PUT /files —
    * binary-safe, constant memory — with its sha256 in X-Content-SHA256,
-   * cross-checked against the executor's reply. Older executors keep the
-   * legacy JSON routes with the base64 transport (see TransferOptions.encoding).
+   * cross-checked against the executor's reply. A file larger than
+   * part_size uploads as a multipart session: up to `concurrency` parts in
+   * flight, each read from disk at its offset, per-part sha256, timed-out
+   * parts split into halves, and a complete that reports missing ranges
+   * fills them and completes again. Older executors keep the legacy JSON
+   * routes with the base64 transport (see TransferOptions.encoding).
    *
    * The transfer is bounded by a 60 s idle timeout only; a slow transfer
    * that keeps moving is never cut off.
    *
    * @throws SandboxFileNotFoundError if the local file doesn't exist.
    */
-  async upload_file(local_path: string, remote_path: string, options: TransferOptions = {}): Promise<void> {
+  async upload_file(
+    local_path: string,
+    remote_path: string,
+    options: TransferOptions & { part_size?: number; concurrency?: number } = {},
+  ): Promise<void> {
     const fs = await import('node:fs/promises');
 
     let total: number;
@@ -578,13 +717,33 @@ export class SandboxFilesystem {
       return;
     }
 
-    const reporter = new ProgressReporter(options.progress, total);
+    const partSize = options.part_size ?? UPLOAD_PART_SIZE;
+    const concurrency = options.concurrency ?? UPLOAD_CONCURRENCY;
+    if (partSize <= 0 || concurrency <= 0) {
+      throw new SandboxFilesystemError('part_size and concurrency must be positive');
+    }
 
     await translatingFilesErrors('upload file', remote_path, async () => {
-      // A first constant-memory pass: the digest travels in X-Content-SHA256,
-      // which precedes the body on the wire, and cross-checks the reply.
+      // A first constant-memory pass: the digest travels in the open payload
+      // for multipart (checked once at complete) or in X-Content-SHA256 for
+      // the single PUT, which precedes the body on the wire.
       const digest = await fileSha256(local_path);
 
+      if (total > partSize) {
+        await this.uploadMultipart(
+          local_path,
+          remote_path,
+          total,
+          digest,
+          partSize,
+          concurrency,
+          options.signal,
+          new ProgressReporter(options.progress, total),
+        );
+        return;
+      }
+
+      const reporter = new ProgressReporter(options.progress, total);
       const { createReadStream } = await import('node:fs');
       const { Readable } = await import('node:stream');
       let done = 0;
@@ -613,6 +772,185 @@ export class SandboxFilesystem {
 
       return reply;
     });
+  }
+
+  /** The session flow: open, parts, complete — abort on any failure.
+   *
+   * Sessions live at the executor: a lost one (restart, idle expiry) cannot
+   * be resumed, only restarted (Python parity: _upload_multipart).
+   */
+  private async uploadMultipart(
+    local_path: string,
+    remote_path: string,
+    size: number,
+    digest: string,
+    partSize: number,
+    concurrency: number,
+    signal: AbortSignal | undefined,
+    reporter: ProgressReporter,
+  ): Promise<void> {
+    const session = await this.sandbox.filesUploadOpen(remote_path, size, { sha256: digest, signal });
+    const uploadId = session?.upload_id;
+    if (typeof uploadId !== 'string' || uploadId.length === 0) {
+      throw new SandboxFilesystemError(`Upload session reply missing upload_id: ${JSON.stringify(session)}`);
+    }
+
+    const counter = new PartProgress(reporter, size);
+    try {
+      // A valid id means the session lives at the executor; every failure
+      // from here on must abort it.
+      const cap = session?.max_part_size;
+      if (typeof cap !== 'number' || cap < 1) {
+        throw new SandboxFilesystemError(`Upload session reply missing max_part_size: ${JSON.stringify(session)}`);
+      }
+      const effective = Math.min(partSize, cap);
+      await this.putParts(local_path, uploadId, [[0, size]], effective, concurrency, signal, counter);
+      const reply = await this.completeFillingGaps(local_path, uploadId, effective, concurrency, signal, counter);
+      // The contract marks complete's sha256 optional: a 200 has already
+      // matched the open-payload digest at the executor.
+      const got = reply?.sha256;
+      if (got !== undefined && got !== digest) {
+        throw new SandboxFilesystemError(
+          `Upload corrupted in transit: executor sha256 ${got} != ${digest}`,
+        );
+      }
+    } catch (error) {
+      try {
+        // The abort is the SDK's own cleanup: it fires without the caller's
+        // signal, which is likely already aborted and would strand the
+        // executor's temp file (the request stays bounded by its own cap).
+        await this.sandbox.filesUploadAbort(uploadId);
+      } catch (abortError) {
+        if (!(abortError instanceof SandboxError)) throw abortError;
+        // A SandboxError from the abort never masks the failure that caused it.
+      }
+      throw error;
+    }
+    counter.finish();
+  }
+
+  /** PUT the given ranges as parts, `concurrency` in flight, fail fast.
+   *
+   * Workers pull from a shared plan; the first failure stops the pool —
+   * the remaining parts are never sent (Python parity: _put_parts).
+   */
+  private async putParts(
+    local_path: string,
+    uploadId: string,
+    ranges: Array<[number, number]>,
+    partSize: number,
+    concurrency: number,
+    signal: AbortSignal | undefined,
+    counter: PartProgress,
+  ): Promise<void> {
+    const plan: Array<[number, number]> = [];
+    for (const [start, end] of ranges) {
+      plan.push(...partPlan(start, end, partSize));
+    }
+    if (plan.length === 0) return;
+
+    let next = 0;
+    let stopped = false;
+    let firstError: { error: unknown } | undefined;
+
+    const worker = async (): Promise<void> => {
+      while (!stopped) {
+        const index = next;
+        next += 1;
+        if (index >= plan.length) return;
+        const [offset, length] = plan[index];
+        try {
+          await this.putOnePart(local_path, uploadId, offset, length, signal, counter);
+        } catch (error) {
+          // The stored interrupt must stop the remaining parts now, not
+          // after the plan drains.
+          stopped = true;
+          if (firstError === undefined) firstError = { error };
+          return;
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, plan.length) }, worker));
+    if (firstError !== undefined) throw firstError.error;
+  }
+
+  /** PUT one range; a timed-out part splits into halves and retries
+   *  (Python parity: _put_one_part — the halves go first-half-first). */
+  private async putOnePart(
+    local_path: string,
+    uploadId: string,
+    offset: number,
+    length: number,
+    signal: AbortSignal | undefined,
+    counter: PartProgress,
+  ): Promise<void> {
+    const pending: Array<[number, number]> = [[offset, length]];
+    while (pending.length > 0) {
+      const [off, ln] = pending.pop()!;
+      const { data, digest } = await readPartWithDigest(local_path, off, ln);
+      try {
+        await this.sandbox.filesUploadPart(uploadId, off, data, { sha256: digest, signal });
+      } catch (error) {
+        // Split-worthy first: a 524 arrives as SandboxServiceError, a
+        // subclass of SandboxRequestError.
+        if (splitWorthy(error) && ln >= 2 * MIN_SPLIT_SIZE) {
+          const half = Math.floor(ln / 2);
+          pending.push([off + half, ln - half]);
+          pending.push([off, half]);
+          continue;
+        }
+        if (error instanceof SandboxRequestError && error.status_code === 404) {
+          throw new SandboxFilesystemError(LOST_SESSION_MESSAGE, { cause: error });
+        }
+        throw error;
+      }
+      counter.add(ln);
+    }
+  }
+
+  /** Complete; a 409's missing ranges are filled and complete retried.
+   *
+   * The session stays live across a 409 — it is the resume signal. Every
+   * fill must shrink the missing bytes; one that does not is the executor
+   * not recording the fills, and that loop is cut here rather than spun
+   * forever (Python parity: _complete_filling_gaps).
+   */
+  private async completeFillingGaps(
+    local_path: string,
+    uploadId: string,
+    partSize: number,
+    concurrency: number,
+    signal: AbortSignal | undefined,
+    counter: PartProgress,
+  ): Promise<FilesUploadCompleteReply> {
+    let previous: number | undefined;
+    for (;;) {
+      try {
+        return await this.sandbox.filesUploadComplete(uploadId, { signal });
+      } catch (error) {
+        if (error instanceof SandboxRequestError && error.status_code === 404) {
+          throw new SandboxFilesystemError(LOST_SESSION_MESSAGE, { cause: error });
+        }
+        if (!(error instanceof SandboxRequestError) || error.status_code !== 409) throw error;
+        const missing = missingRangesFrom409(error.body);
+        if (missing === null) {
+          throw new SandboxFilesystemError(
+            `Upload incomplete and the missing-ranges reply was unusable: ${formatErrorBody(error.body)}`,
+            { cause: error },
+          );
+        }
+        const missingBytes = missing.reduce((bytes, [start, end]) => bytes + (end - start), 0);
+        if (previous !== undefined && missingBytes >= previous) {
+          throw new SandboxFilesystemError(
+            `Upload made no progress filling missing ranges: ${JSON.stringify(missing)}`,
+            { cause: error },
+          );
+        }
+        previous = missingBytes;
+        await this.putParts(local_path, uploadId, missing, partSize, concurrency, signal, counter);
+      }
+    }
   }
 
   /**

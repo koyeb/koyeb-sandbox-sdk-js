@@ -24,7 +24,17 @@ import type { Snapshot, SnapshotOptions, SnapshotType } from './snapshot.js';
 import { buildNetworkPolicy } from './cidr.js';
 import { resolveClient } from './credentials.js';
 import { CommandRunner } from './command-runner.js';
-import { ExecutorGateway, type FileStatEntry, type FilesPutContent, type FilesPutOptions, type FilesPutReply } from './executor-gateway.js';
+import {
+  ExecutorGateway,
+  type FileStatEntry,
+  type FilesPutContent,
+  type FilesPutOptions,
+  type FilesPutReply,
+  type FilesReadRangeReply,
+  type FilesUploadCompleteReply,
+  type FilesUploadSession,
+  type FilesUploadStatus,
+} from './executor-gateway.js';
 import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
 import { type Duration, parseDuration } from './duration.js';
 import { assert, isDefined, isUndefined, omitUndefined } from './prelude.js';
@@ -834,6 +844,49 @@ export class Sandbox {
   /** Stream a file's bytes from GET /files (executor v0.0.24+), chunk by chunk. */
   filesRead(path: string, options?: { signal?: AbortSignal }): AsyncGenerator<Uint8Array, void, unknown> {
     return this.gateway.filesRead(path, options);
+  }
+
+  /** GET /files with the resume headers (executor v0.0.24+): the reply's
+   *  status, strong ETag and idle-bounded body stream. */
+  filesReadRange(
+    path: string,
+    options?: { range?: string; ifRange?: string; signal?: AbortSignal },
+  ): Promise<FilesReadRangeReply> {
+    return this.gateway.filesReadRange(path, options);
+  }
+
+  /** Open a multipart upload session (executor v0.0.24+). */
+  filesUploadOpen(
+    path: string,
+    size: number,
+    options?: { mode?: string; sha256?: string; signal?: AbortSignal },
+  ): Promise<FilesUploadSession> {
+    return this.gateway.filesUploadOpen(path, size, options);
+  }
+
+  /** Write one part at its offset (executor v0.0.24+); idempotent at the executor. */
+  filesUploadPart(
+    uploadId: string,
+    offset: number,
+    content: Uint8Array,
+    options?: { sha256?: string; signal?: AbortSignal },
+  ): Promise<void> {
+    return this.gateway.filesUploadPart(uploadId, offset, content, options);
+  }
+
+  /** The ranges received so far for a live session (executor v0.0.24+). */
+  filesUploadStatus(uploadId: string, options?: { signal?: AbortSignal }): Promise<FilesUploadStatus> {
+    return this.gateway.filesUploadStatus(uploadId, options);
+  }
+
+  /** Check coverage and commit (executor v0.0.24+). */
+  filesUploadComplete(uploadId: string, options?: { signal?: AbortSignal }): Promise<FilesUploadCompleteReply> {
+    return this.gateway.filesUploadComplete(uploadId, options);
+  }
+
+  /** Abort a session and remove its temp file (executor v0.0.24+). */
+  filesUploadAbort(uploadId: string, options?: { signal?: AbortSignal }): Promise<void> {
+    return this.gateway.filesUploadAbort(uploadId, options);
   }
 
   get filesystem() {

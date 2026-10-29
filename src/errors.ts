@@ -99,8 +99,8 @@ export class ServicePoolError extends SandboxError {
 }
 
 export class SandboxFilesystemError extends SandboxError {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
   }
 }
 

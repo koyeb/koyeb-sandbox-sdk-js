@@ -23,7 +23,10 @@ import {
   SandboxFileNotFoundError,
   SandboxFilesystemError,
   SandboxRequestError,
+  SandboxServiceError,
+  SandboxTimeoutError,
 } from './errors.js';
+import { UPLOAD_CONCURRENCY, UPLOAD_PART_SIZE } from './constants.js';
 
 /**
  * Filesystem-layer tests for the streamed /files routes (executor v0.0.24+)
@@ -76,6 +79,12 @@ type FakePort = {
   filesPut: Mock;
   filesRead: Mock;
   filesStat: Mock;
+  filesReadRange: Mock;
+  filesUploadOpen: Mock;
+  filesUploadPart: Mock;
+  filesUploadStatus: Mock;
+  filesUploadComplete: Mock;
+  filesUploadAbort: Mock;
 };
 
 /**
@@ -114,8 +123,219 @@ function fakePort(overrides: Overrides = {}): FakePort {
       if (reply instanceof Error) throw reply;
       return reply ?? {};
     }),
+    // The ranged seam download_file rides; by default it serves the legacy
+    // filesRead override (chunks array or Error) as a 200 with a fixed etag.
+    filesReadRange: vi.fn(async (path: string, options?: { range?: string; ifRange?: string }) => {
+      calls.push(['files_read_range', path, options?.range, options?.ifRange]);
+      const reply = overrides.filesRead;
+      if (reply instanceof Error) throw reply;
+      const chunks = (Array.isArray(reply) ? reply : [reply ?? new Uint8Array(0)]) as Uint8Array[];
+      return {
+        status: 200,
+        etag: '"fake-etag"',
+        stream: (async function* () {
+          for (const chunk of chunks) yield chunk;
+        })(),
+      };
+    }),
+    filesUploadOpen: vi.fn(async (path: string, size: number) => {
+      calls.push(['open', path, size]);
+      return { upload_id: 'u-1', max_part_size: 1 << 30 };
+    }),
+    filesUploadPart: vi.fn(async (uploadId: string, offset: number) => {
+      calls.push(['part', uploadId, offset]);
+    }),
+    filesUploadStatus: vi.fn(async (uploadId: string) => {
+      calls.push(['status', uploadId]);
+      return { size: 0, ranges: [] };
+    }),
+    filesUploadComplete: vi.fn(async () => {
+      calls.push(['complete']);
+      return { size: 0 };
+    }),
+    filesUploadAbort: vi.fn(async () => {
+      calls.push(['abort']);
+    }),
   };
   return port;
+}
+
+/** Multipart session faults the fs layer must recover from (Python parity:
+ *  _UploadFakeExecutor's fail_parts / forget_parts / never_record knobs). */
+type UploadFakeOptions = {
+  maxPartSize?: number;
+  /** `${offset}:${length}` → the error thrown once on that part attempt. */
+  failParts?: Record<string, unknown>;
+  /** Offsets whose first span lands but is forgotten — complete's 409 fill. */
+  forgetParts?: number[];
+  /** Offsets whose spans are never recorded — the no-progress liar. */
+  neverRecord?: number[];
+  /** A canned open reply; the session is not created when it is given. */
+  openReply?: Record<string, unknown>;
+  lieAboutSha?: string;
+  raw409Body?: string;
+  abortError?: boolean;
+  onPart?: (options: { signal?: AbortSignal }) => void | Promise<void>;
+  omitCompleteSha?: boolean;
+};
+
+/**
+ * Stateful fake for the multipart session flow, mirroring the Python suite's
+ * _UploadFakeExecutor: parts land at offsets into a pre-sized buffer, complete
+ * answers 409 with the true missing ranges until coverage holds, then verifies
+ * the whole-file digest the way the executor does. Records every call in
+ * `calls` exactly like fakePort does, so lastCall() readouts work on both.
+ */
+function uploadFake(options: UploadFakeOptions = {}) {
+  const maxPartSize = options.maxPartSize ?? 1 << 30;
+  const failParts = new Map(Object.entries(options.failParts ?? {}));
+  const forgetParts = new Set(options.forgetParts ?? []);
+  const neverRecord = new Set(options.neverRecord ?? []);
+  const calls: unknown[][] = [];
+  let session: { size: number; want: string | undefined; data: Uint8Array; spans: Array<[number, number]> } | null =
+    null;
+  let inFlight = 0;
+  let maxInFlight = 0;
+
+  // The executor's addSpan: merge every overlapping-or-adjacent span into the
+  // new one, keep the rest, sort.
+  const record = (start: number, end: number) => {
+    if (session === null) return;
+    let ns = start;
+    let ne = end;
+    const out: Array<[number, number]> = [];
+    for (const [s, e] of session.spans) {
+      if (e >= ns && ne >= s) {
+        ns = Math.min(ns, s);
+        ne = Math.max(ne, e);
+        continue;
+      }
+      out.push([s, e]);
+    }
+    out.push([ns, ne]);
+    out.sort((a, b) => a[0] - b[0]);
+    session.spans = out;
+  };
+
+  // The executor's missingSpans: the parts of [0, size) no span covers.
+  const missing = (): Array<[number, number]> => {
+    if (session === null) return [];
+    let at = 0;
+    const out: Array<[number, number]> = [];
+    for (const [s, e] of session.spans) {
+      if (s > at) out.push([at, s]);
+      at = Math.max(at, e);
+    }
+    if (at < session.size) out.push([at, session.size]);
+    return out;
+  };
+
+  const port: FakePort = {
+    calls,
+    exec: vi.fn(async () => ({ stdout: '', stderr: '', code: 0 })),
+    request: vi.fn(async () => ({})),
+    hasFilesRoutes: vi.fn(async () => true),
+    filesStat: vi.fn(async (path: string) => {
+      calls.push(['files_stat', path]);
+      return { type: 'file', size: 12, mode: '0644', mtime: '2026-01-01T00:00:00Z' };
+    }),
+    filesPut: vi.fn(async (path: string, content: unknown, o?: Record<string, unknown>) => {
+      const joined = await joinContent(content);
+      calls.push(['files_put', path, joined, o?.sha256]);
+      return { size: joined.byteLength, sha256: sha256(joined) };
+    }),
+    filesRead: vi.fn(async function* (path: string) {
+      calls.push(['files_read', path]);
+      yield encoder.encode('remote-bytes');
+    }),
+    filesReadRange: vi.fn(async (path: string, o?: { range?: string; ifRange?: string }) => {
+      calls.push(['files_read_range', path, o?.range, o?.ifRange]);
+      return { status: 200, etag: '"fake-etag"', stream: (async function* () { yield encoder.encode('remote-bytes'); })() };
+    }),
+    filesUploadOpen: vi.fn(async (path: string, size: number, o?: { mode?: string; sha256?: string }) => {
+      calls.push(['open', path, size, o?.sha256]);
+      if (options.openReply) return { ...options.openReply };
+      session = { size, want: o?.sha256, data: new Uint8Array(size), spans: [] };
+      return { upload_id: 'u-1', max_part_size: maxPartSize };
+    }),
+    filesUploadPart: vi.fn(
+      async (uploadId: string, offset: number, content: Uint8Array, o?: { sha256?: string; signal?: AbortSignal }) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
+          calls.push(['part', offset, content, o?.sha256]);
+          if (options.onPart) await options.onPart({ signal: o?.signal });
+          const failure = failParts.get(`${offset}:${content.byteLength}`);
+          if (failure !== undefined) {
+            failParts.delete(`${offset}:${content.byteLength}`);
+            throw failure;
+          }
+          if (session === null) throw statusError(404, '{"error": "unknown upload session"}');
+          if (o?.sha256 !== undefined && sha256(content) !== o.sha256) {
+            throw statusError(400, '{"error": "sha256 mismatch on part"}');
+          }
+          if (offset + content.byteLength > session.size) {
+            throw statusError(400, '{"error": "part writes past the end"}');
+          }
+          if (content.byteLength > maxPartSize) {
+            throw statusError(413, '{"error": "part is larger than max_part_size"}');
+          }
+          session.data.set(content, offset);
+          if (neverRecord.has(offset)) {
+            // dropped: complete will report it missing forever
+          } else if (forgetParts.has(offset)) {
+            forgetParts.delete(offset); // forgotten once; a re-send records
+          } else {
+            record(offset, offset + content.byteLength);
+          }
+        } finally {
+          inFlight -= 1;
+        }
+      },
+    ),
+    filesUploadStatus: vi.fn(async (uploadId: string) => {
+      calls.push(['status', uploadId]);
+      if (session === null) throw statusError(404, '{"error": "unknown upload session"}');
+      return { size: session.size, ranges: session.spans.map(([start, end]) => ({ start, end })) };
+    }),
+    filesUploadComplete: vi.fn(async () => {
+      calls.push(['complete']);
+      if (session === null) throw statusError(404, '{"error": "unknown upload session"}');
+      const miss = missing();
+      if (miss.length > 0) {
+        const body =
+          options.raw409Body ??
+          JSON.stringify({
+            error: `${miss.length} range(s) still missing`,
+            ranges: miss.map(([start, end]) => ({ start, end })),
+          });
+        throw statusError(409, body);
+      }
+      const digest = sha256(session.data);
+      if (session.want !== undefined && digest !== session.want) {
+        session = null;
+        throw statusError(400, `{"error": "sha256 mismatch: got ${digest}"}`);
+      }
+      if (options.omitCompleteSha) return { size: session.size };
+      return { size: session.size, sha256: options.lieAboutSha ?? digest };
+    }),
+    filesUploadAbort: vi.fn(async () => {
+      calls.push(['abort']);
+      if (options.abortError) throw statusError(404, '{"error": "unknown upload session"}');
+      if (session === null) throw statusError(404, '{"error": "unknown upload session"}');
+      session = null;
+    }),
+  };
+
+  return {
+    port,
+    calls,
+    kinds: () => calls.map((call) => call[0] as string),
+    /** (offset, length) of every part PUT, in call order. */
+    partPuts: () => calls.filter((call) => call[0] === 'part').map((call) => [call[1] as number, (call[2] as Uint8Array).byteLength] as [number, number]),
+    landed: () => (session ? new Uint8Array(session.data) : null),
+    maxInFlight: () => maxInFlight,
+  };
 }
 
 /** The filesystem under test, wired to a fake port. */
@@ -605,6 +825,553 @@ describe('upload_file on the new routes', () => {
 
     expect((error as Error).name).toBe('AbortError');
     await rm(local, { force: true });
+  });
+});
+
+/** The multipart session flow, Python parity: test_filesystem.py's multipart
+ *  classes. The split cases run at MiB scale because the split floor is the
+ *  real 1 MiB (Python patches its constant down; the sizes are still fast). */
+const MIB = 1024 * 1024;
+const DATA12 = new Uint8Array(12).map((_, i) => 97 + i); // 'abcdefghijkl'
+
+async function tempDir(): Promise<string> {
+  return mkdtemp(join(tmpdir(), 'st136-'));
+}
+
+describe('upload defaults', () => {
+  it('pins the documented defaults', () => {
+    expect(UPLOAD_PART_SIZE).toBe(50 * 1024 * 1024);
+    expect(UPLOAD_CONCURRENCY).toBe(4);
+  });
+});
+
+describe('upload_file multipart dispatch', () => {
+  it('a small file takes the single streamed PUT', async () => {
+    const fake = uploadFake();
+    const local = await tempFile('abc');
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/small.bin');
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.kinds()).toEqual(['files_put']);
+    expect(fake.landed()).toBeNull();
+  });
+
+  it('a size past part_size opens a session, parts at offsets, completes', async () => {
+    const fake = uploadFake();
+    const local = await tempFile(DATA12);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.kinds()[0]).toBe('open');
+    expect(fake.kinds()).not.toContain('files_put');
+    expect(fake.kinds()[fake.kinds().length - 1]).toBe('complete');
+    expect(fake.landed()).toEqual(DATA12);
+  });
+
+  it('a zero-byte file takes the single streamed PUT', async () => {
+    const fake = uploadFake();
+    const local = await tempFile('');
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/empty.bin', { part_size: 4 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.kinds()).toEqual(['files_put']);
+  });
+
+  it('caps part_size by the reply max_part_size', async () => {
+    const fake = uploadFake({ maxPartSize: 3 });
+    const local = await tempFile(DATA12);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.partPuts().sort((a, b) => a[0] - b[0])).toEqual([
+      [0, 3],
+      [3, 3],
+      [6, 3],
+      [9, 3],
+    ]);
+    expect(fake.landed()).toEqual(DATA12);
+  });
+
+  it('raises before any wire call on an invalid part_size', async () => {
+    const fake = uploadFake();
+    const local = await tempFile('abc');
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/x', { part_size: 0 }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(SandboxFilesystemError);
+      expect(fake.calls).toEqual([]);
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+
+  it('raises before any wire call on an invalid concurrency', async () => {
+    const fake = uploadFake();
+    const local = await tempFile('abc');
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/x', { concurrency: 0 }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(SandboxFilesystemError);
+      expect(fake.calls).toEqual([]);
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+});
+
+describe('upload_file session wire', () => {
+  it('open sends the path, the size and the whole-file digest', async () => {
+    const fake = uploadFake();
+    const local = await tempFile(DATA12);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    const openCall = fake.calls[0];
+    expect(openCall[0]).toBe('open');
+    expect(openCall[1]).toBe('/r/big.bin');
+    expect(openCall[2]).toBe(12);
+    expect(openCall[3]).toBe(sha256(DATA12));
+  });
+
+  it('parts carry their bytes at offsets with per-part digests', async () => {
+    const fake = uploadFake();
+    const local = await tempFile(DATA12);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.partPuts()).toEqual([
+      [0, 4],
+      [4, 4],
+      [8, 4],
+    ]);
+    for (const call of fake.calls) {
+      if (call[0] === 'part') {
+        expect(call[3]).toBe(sha256(call[2] as Uint8Array));
+      }
+    }
+    expect(fake.landed()).toEqual(DATA12);
+  });
+
+  it('raises corrupted in transit on a reply digest mismatch, and aborts', async () => {
+    const fake = uploadFake({ lieAboutSha: 'ff'.repeat(32) });
+    const local = await tempFile(DATA12);
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4 }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain('corrupted in transit');
+      expect(fake.kinds()).toContain('abort');
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+
+  it("still succeeds when complete's reply carries no sha256 (contract-optional)", async () => {
+    const fake = uploadFake({ omitCompleteSha: true });
+    const local = await tempFile(DATA12);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.landed()).toEqual(DATA12);
+    expect(fake.kinds()).not.toContain('abort');
+  });
+
+  it('aborts the live session when the open reply has no max_part_size', async () => {
+    const fake = uploadFake({ openReply: { upload_id: 'u-1' } });
+    const local = await tempFile(DATA12);
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain('max_part_size');
+      expect(fake.kinds().filter((kind) => kind === 'abort')).toHaveLength(1);
+      expect(fake.kinds()).not.toContain('part');
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+
+  it('raises without aborting on a malformed open reply', async () => {
+    const fake = uploadFake({ openReply: { max_part_size: 4 } });
+    const local = await tempFile(DATA12);
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4 }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain('upload_id');
+      expect(fake.kinds()).not.toContain('abort');
+      expect(fake.kinds()).not.toContain('part');
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+});
+
+describe('upload_file concurrency', () => {
+  const DATA32 = new Uint8Array(32).map((_, i) => i);
+
+  it('holds four parts in flight at once (the barrier only passes when all four are truly simultaneous)', async () => {
+    let arrived = 0;
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fake = uploadFake({
+      onPart: () => {
+        arrived += 1;
+        if (arrived === 4) release();
+        return released;
+      },
+    });
+    const local = await tempFile(DATA32);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.maxInFlight()).toBe(4);
+    expect(fake.landed()).toEqual(DATA32);
+  });
+
+  it('runs serially at concurrency one, in offset order', async () => {
+    const fake = uploadFake();
+    const local = await tempFile(DATA32);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.maxInFlight()).toBe(1);
+    expect(fake.partPuts()).toEqual([
+      [0, 4],
+      [4, 4],
+      [8, 4],
+      [12, 4],
+      [16, 4],
+      [20, 4],
+      [24, 4],
+      [28, 4],
+    ]);
+  });
+});
+
+describe('upload_file timeout split', () => {
+  // DATA12 scaled to the real 1 MiB split floor: parts at 8 MiB.
+  const data12Mib = new Uint8Array(12 * MIB).map((_, i) => i & 0xff);
+  const timeoutError = () => new SandboxTimeoutError('sbx', 60, 'Request timed out after 60s');
+
+  it('splits a timed-out part into halves and retries', async () => {
+    const fake = uploadFake({ failParts: { [`0:${8 * MIB}`]: timeoutError() } });
+    const local = await tempFile(data12Mib);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 8 * MIB, concurrency: 1 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.partPuts().sort((a, b) => a[0] - b[0] || a[1] - b[1])).toEqual([
+      [0, 4 * MIB],
+      [0, 8 * MIB],
+      [4 * MIB, 4 * MIB],
+      [8 * MIB, 4 * MIB],
+    ]);
+    expect(sha256(fake.landed()!)).toBe(sha256(data12Mib)); // hash compare: a 12 MiB deep-equal is slow
+  });
+
+  it('splits a Cloudflare 524 too (the ServiceError subclass trap: split-worthiness is checked before the 404 arm)', async () => {
+    const fake = uploadFake({ failParts: { [`0:${8 * MIB}`]: new SandboxServiceError(524, 'origin timeout') } });
+    const local = await tempFile(data12Mib);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 8 * MIB, concurrency: 1 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.partPuts().sort((a, b) => a[0] - b[0] || a[1] - b[1])).toEqual([
+      [0, 4 * MIB],
+      [0, 8 * MIB],
+      [4 * MIB, 4 * MIB],
+      [8 * MIB, 4 * MIB],
+    ]);
+    expect(sha256(fake.landed()!)).toBe(sha256(data12Mib)); // hash compare: a 12 MiB deep-equal is slow
+  });
+
+  it('recurses: each half splits again until a part lands', async () => {
+    const fake = uploadFake({
+      failParts: {
+        [`0:${8 * MIB}`]: timeoutError(),
+        [`0:${4 * MIB}`]: timeoutError(),
+      },
+    });
+    const local = await tempFile(data12Mib);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 8 * MIB, concurrency: 1 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.partPuts().sort((a, b) => a[0] - b[0] || a[1] - b[1])).toEqual([
+      [0, 2 * MIB],
+      [0, 4 * MIB],
+      [0, 8 * MIB],
+      [2 * MIB, 2 * MIB],
+      [4 * MIB, 4 * MIB],
+      [8 * MIB, 4 * MIB],
+    ]);
+    expect(sha256(fake.landed()!)).toBe(sha256(data12Mib)); // hash compare: a 12 MiB deep-equal is slow
+  });
+
+  it('fails the upload when the failed part is below the split floor', async () => {
+    const data2Mib = new Uint8Array(2 * MIB).map((_, i) => i & 0xff);
+    const fake = uploadFake({ failParts: { [`0:${MIB}`]: timeoutError() } });
+    const local = await tempFile(data2Mib);
+
+    try {
+      const error = await fsOf(fake.port)
+        .upload_file(local, '/r/big.bin', { part_size: MIB, concurrency: 1 })
+        .catch((e: unknown) => e);
+      expect((error as Error).message).toContain('timed out');
+      expect(fake.kinds()).toContain('abort');
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+});
+
+describe('upload_file abort on failure', () => {
+  it('stops without draining the plan on a caller abort, and aborts the session', async () => {
+    const controller = new AbortController();
+    const fake = uploadFake({
+      // Every part blocks until the caller aborts: the pool must stop with
+      // only the in-flight parts, never drain the 20-part plan.
+      onPart: (options) =>
+        new Promise((_resolve, reject) => {
+          const abort = () => reject(new DOMException('aborted', 'AbortError'));
+          if (options.signal?.aborted) abort();
+          else options.signal?.addEventListener('abort', abort, { once: true });
+        }),
+    });
+    const filesystem = fsOf(fake.port);
+    const local = await tempFile(new Uint8Array(80));
+
+    try {
+      const pending = filesystem
+        .upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 2, signal: controller.signal })
+        .catch((e: unknown) => e);
+      while (fake.partPuts().length < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      controller.abort();
+      const error = await pending;
+
+      expect((error as Error).name).toBe('AbortError');
+      expect(fake.partPuts().length).toBe(2); // did not drain the 20-part plan
+      expect(fake.kinds()).toContain('abort');
+      expect(fake.landed()).toBeNull();
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+
+  it('aborts and raises on a hard part failure', async () => {
+    const fake = uploadFake({
+      failParts: { '4:4': statusError(400, '{"error": "sha256 mismatch on part"}') },
+    });
+    const local = await tempFile(DATA12);
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain('Failed to upload file');
+      expect(fake.kinds()).toContain('abort');
+      expect(fake.landed()).toBeNull();
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+
+  it("lets an abort failure never mask the original part failure", async () => {
+    const fake = uploadFake({
+      failParts: { '0:4': statusError(400, '{"error": "sha256 mismatch on part"}') },
+      abortError: true,
+    });
+    const local = await tempFile(DATA12);
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain('sha256 mismatch on part');
+      expect(fake.kinds()).toContain('abort');
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+
+  it('names the restart when the session was lost (a 404 on a part)', async () => {
+    const fake = uploadFake({
+      failParts: { '0:4': statusError(404, '{"error": "unknown upload session"}') },
+    });
+    const local = await tempFile(DATA12);
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain('session was lost');
+      expect(fake.kinds()).toContain('abort');
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+});
+
+describe('upload_file 409 resume', () => {
+  it('fills the missing ranges from a 409 and completes again', async () => {
+    const fake = uploadFake({ forgetParts: [4] });
+    const local = await tempFile(DATA12);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.kinds().filter((kind) => kind === 'complete')).toHaveLength(2);
+    expect(fake.partPuts()).toHaveLength(4); // 3 parts + the one fill, no full re-send
+    expect(fake.partPuts()[3]).toEqual([4, 4]);
+    expect(fake.landed()).toEqual(DATA12);
+  });
+
+  it('fills two missing ranges at once', async () => {
+    const fake = uploadFake({ forgetParts: [4, 8] });
+    const local = await tempFile(DATA12);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(fake.kinds().filter((kind) => kind === 'complete')).toHaveLength(2);
+    expect(fake.partPuts()).toHaveLength(5);
+    expect(fake.landed()).toEqual(DATA12);
+  });
+
+  it('raises instead of looping when a fill makes no progress', async () => {
+    const fake = uploadFake({ neverRecord: [4] });
+    const local = await tempFile(DATA12);
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain('no progress');
+      expect(fake.kinds().filter((kind) => kind === 'complete')).toHaveLength(2);
+      expect(fake.kinds()).toContain('abort');
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+
+  it('raises on an unparseable 409 body, not an Exists', async () => {
+    const fake = uploadFake({ neverRecord: [4], raw409Body: 'not json' });
+    const local = await tempFile(DATA12);
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain('missing-ranges reply was unusable');
+      expect(error).not.toBeInstanceOf(SandboxFileExistsError);
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+});
+
+describe('upload_file multipart progress', () => {
+  it('never passes the file size across a 409 fill', async () => {
+    const fake = uploadFake({ forgetParts: [4] });
+    const local = await tempFile(DATA12);
+    const seen: Array<[number, number]> = [];
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', {
+        part_size: 4,
+        concurrency: 1,
+        progress: (done, total) => seen.push([done, total]),
+      });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen[seen.length - 1]).toEqual([12, 12]);
+    for (const [done, total] of seen) expect(done).toBeLessThanOrEqual(total);
+  });
+
+  it('reaches the full size, monotone', async () => {
+    const fake = uploadFake();
+    const local = await tempFile(DATA12);
+    const seen: Array<[number, number]> = [];
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', {
+        part_size: 4,
+        concurrency: 1,
+        progress: (done, total) => seen.push([done, total]),
+      });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(seen[seen.length - 1]).toEqual([12, 12]);
+    const dones = seen.map(([done]) => done);
+    expect(dones).toEqual([...dones].sort((a, b) => a - b));
+  });
+});
+
+describe('upload_file event loop', () => {
+  it('stays responsive during the whole-file digest (async twin parity)', async () => {
+    const fake = uploadFake();
+    const data = new Uint8Array(24 * MIB).map((_, i) => i & 0xff);
+    const local = await tempFile(data);
+    let ticked = false;
+    setTimeout(() => {
+      ticked = true;
+    }, 20);
+
+    try {
+      await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 8 * MIB });
+    } finally {
+      await rm(local, { force: true });
+    }
+
+    expect(ticked).toBe(true);
   });
 });
 

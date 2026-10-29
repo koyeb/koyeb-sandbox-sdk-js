@@ -361,6 +361,28 @@ describe('UstarReader', () => {
     await expect(readMembers(await rawArchive([header, ustarTrailer()]))).rejects.toThrow(/checksum/i);
   });
 
+  it('throws when the stream ends mid-header', async () => {
+    const bytes = await archiveBytes([
+      { member: member({ name: 'a.txt' }), content: encoder.encode('hello') },
+      { member: member({ name: 'b.txt' }), content: encoder.encode('world') },
+    ]);
+    // Cut inside b.txt's header: the first member parses, the second
+    // never yields a full block.
+    const cut = bytes.subarray(0, 2 * BLOCK_SIZE + 300);
+    await expect(readMembers(cut)).rejects.toThrow(/ended without a trailer/);
+  });
+
+  it('throws when the stream ends mid-member', async () => {
+    const bytes = await archiveBytes([
+      { member: member({ name: 'a.txt' }), content: encoder.encode('hello') },
+      { member: member({ name: 'b.txt' }), content: encoder.encode('world') },
+    ]);
+    // Cut inside b.txt's declared content: the header parses, the bytes
+    // run out before the size does.
+    const cut = bytes.subarray(0, 2 * BLOCK_SIZE + 512 + 2);
+    await expect(readMembers(cut)).rejects.toThrow(/ended mid-member/);
+  });
+
   it('parses entries split across arbitrary stream chunk boundaries', async () => {
     const bytes = await archiveBytes([
       { member: member({ name: 'a.txt' }), content: encoder.encode('hello') },

@@ -208,11 +208,6 @@ class ByteReader {
     this.buffer = this.buffer.subarray(length);
     return out;
   }
-
-  /** Whether the stream has more buffered bytes (a truncation check). */
-  atEnd(): boolean {
-    return this.done && this.buffer.length === 0;
-  }
 }
 
 /** An ASCII field's octal value, NUL- or space-terminated. */

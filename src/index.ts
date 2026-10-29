@@ -34,3 +34,13 @@ export {
   type SnapshotStatus,
   type SnapshotType,
 } from './snapshot.js';
+export {
+  SandboxFilesystem,
+  type FileContent,
+  type FileStat,
+  type ReadFileEncoding,
+  type ReadFileOptions,
+  type TransferOptions,
+  type TransferProgress,
+  type WriteFileOptions,
+} from './sandbox-filesystem.js';

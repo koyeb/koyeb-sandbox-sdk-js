@@ -8,8 +8,8 @@ async function main() {
   const content = 'Hello, Koyeb Sandbox!\nThis is a test file.';
   await fs.write_file('/tmp/hello.txt', content);
 
-  const fileInfo = await fs.read_file('/tmp/hello.txt');
-  console.log(fileInfo.content);
+  const text = await fs.read_file('/tmp/hello.txt');
+  console.log(text);
 
   const code = "#!/usr/bin/env node\nconsole.log('Hello from Node!')\n";
   await fs.write_file('/tmp/script.js', code);

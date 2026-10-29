@@ -24,7 +24,7 @@ import type { Snapshot, SnapshotOptions, SnapshotType } from './snapshot.js';
 import { buildNetworkPolicy } from './cidr.js';
 import { resolveClient } from './credentials.js';
 import { CommandRunner } from './command-runner.js';
-import { ExecutorGateway } from './executor-gateway.js';
+import { ExecutorGateway, type FileStatEntry, type FilesPutContent, type FilesPutOptions, type FilesPutReply } from './executor-gateway.js';
 import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
 import { type Duration, parseDuration } from './duration.js';
 import { assert, isDefined, isUndefined, omitUndefined } from './prelude.js';
@@ -814,6 +814,26 @@ export class Sandbox {
     options?: { timeout?: number },
   ) {
     return this.gateway.post(path, init, requestBody, hooks, options);
+  }
+
+  /** Whether this sandbox's executor serves the streamed /files routes (probed once per handle). */
+  hasFilesRoutes(): Promise<boolean> {
+    return this.gateway.hasFilesRoutes();
+  }
+
+  /** Stat a file on the streamed /files routes (executor v0.0.24+). */
+  filesStat(path: string): Promise<FileStatEntry> {
+    return this.gateway.filesStat(path);
+  }
+
+  /** Stream content to a file through PUT /files (executor v0.0.24+), one non-retrying request. */
+  filesPut(path: string, content: FilesPutContent, options?: FilesPutOptions): Promise<FilesPutReply> {
+    return this.gateway.filesPut(path, content, options);
+  }
+
+  /** Stream a file's bytes from GET /files (executor v0.0.24+), chunk by chunk. */
+  filesRead(path: string, options?: { signal?: AbortSignal }): AsyncGenerator<Uint8Array, void, unknown> {
+    return this.gateway.filesRead(path, options);
   }
 
   get filesystem() {

@@ -279,11 +279,13 @@ describe('filesystem parity', () => {
     expect((other as Error).message).toBe('Failed to remove: rm: /root: permission denied');
   });
 
-  it('delete_file keeps the exists mapping available', async () => {
+  it('delete_file stays generic on exists: Python classifies not-found only', async () => {
     const sandbox = makeSandbox();
     mockRequest(sandbox, { error: 'remove /tmp/a: file exists' });
 
-    await expect(sandbox.filesystem.delete_file('/tmp/a')).rejects.toBeInstanceOf(SandboxFileExistsError);
+    const rejection = expect(sandbox.filesystem.delete_file('/tmp/a')).rejects;
+    await rejection.toBeInstanceOf(SandboxFilesystemError);
+    await rejection.not.toBeInstanceOf(SandboxFileExistsError);
   });
 });
 

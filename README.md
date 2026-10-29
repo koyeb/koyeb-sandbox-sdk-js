@@ -283,16 +283,19 @@ For callback-based streaming without event listeners, `exec` accepts `on_stdout`
 
 ## Filesystem Helpers
 
-Access via `sandbox.filesystem`. Operations run over the sandbox API and fall back to `exec` only when needed.
+Access via `sandbox.filesystem`. On executors v0.0.24+ the byte-moving operations run on the executor's streamed `/files` routes — binary-safe, constant memory, real bytes on disk for every content type — and older executors fall back to the legacy JSON routes automatically (one probe per sandbox handle, one warning). On the legacy path binary content rides the base64 transport, so it still round-trips byte-exact through this SDK.
 
 | Method                                 | Description                                           |
 | -------------------------------------- | ----------------------------------------------------- |
 | `mkdir(path, recursive?)`              | Create a directory.                                   |
 | `list_dir(path?)`                      | List entries inside a directory. Defaults to `.`.     |
+| `ls(path?)`                            | The short spelling of `list_dir` (Python parity).     |
 | `delete_dir(path)`                     | Delete a directory tree.                              |
-| `write_file(path, content)`            | Create or replace a text file.                        |
-| `write_files(files)`                   | Bulk write helper for multiple files.                 |
-| `read_file(path)`                      | Fetch `{ content, encoding }` for a remote file.      |
+| `write_file(path, content, options?)`  | Create or replace a file. `content`: string, `Uint8Array`, `Blob`, web `ReadableStream` or Node stream. `options.mode`: octal string like `'0644'` (streamed routes only; legacy keeps the destination's mode); `options.signal`: aborts mid-flight. |
+| `write_files(files)`                   | Bulk write helper for multiple text files.            |
+| `read_file(path, options?)`            | Read a file. `{ encoding: 'utf-8' }` (default) → string, `'base64'` → base64 of the real bytes on the streamed routes (decoded bytes on legacy), `null` → raw `Uint8Array`. |
+| `read_stream(path)`                    | Async-iterate a file's bytes chunk by chunk (constant memory). |
+| `stat(path)`                           | `{ type, size, mode, mtime, sha256? }` — requires the streamed routes (v0.0.24+). |
 | `rename_file(oldPath, newPath)`        | Rename using an internal `mv` command.                |
 | `move_file(src, dst)`                   | Move a file; maps `NO_SUCH_FILE` to `SandboxFileNotFoundError`. |
 | `delete_file(path)`                     | Delete a single file via the executor endpoint.       |
@@ -300,22 +303,25 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 | `exists(path)`                         | Return `true` if the path exists.                     |
 | `is_file(path)`                        | Return `true` if the path is a regular file.          |
 | `is_dir(path)`                         | Return `true` if the path is a directory.             |
-| `upload_file(localPath, remotePath)`   | Read a local file and upload it to the sandbox.       |
-| `download_file(remotePath, localPath)` | Download a sandbox file to your local disk.           |
+| `upload_file(localPath, remotePath, options?)`  | Stream a local file to the sandbox: `progress(done, total)` at most every 100 ms, `signal` honored mid-flight, sha256 verified end to end. Legacy-only `options.encoding` picks the transport: `'utf-8'` (default) or `'base64'` (binary). |
+| `download_file(remotePath, localPath, options?)` | Stream a sandbox file to disk into `<local>.part`, renamed into place on success. Same options as the upload. |
 
-> **Warning — breaking change:** `download_file` now takes `(remotePath, localPath)`,
-> matching the Python SDK and the CLI. Both transfers read their arguments in the
+> **Warning — breaking change:** `download_file` takes `(remotePath, localPath)`,
+> matching the Python SDK and the CLI, and `read_file` returns the content directly —
+> a string, or a `Uint8Array` with `{ encoding: null }` (and with `'base64'` on legacy
+> executors) — instead of the executor's
+> `{ content, encoding }` reply object. Both transfers read their arguments in the
 > direction of the transfer: `upload_file(localPath, remotePath)` and
-> `download_file(remotePath, localPath)`. Previously this SDK took
-> `download_file(localPath, remotePath)` — the opposite of every other Koyeb client —
-> so code ported from Python or the CLI silently wrote to the wrong path.
+> `download_file(remotePath, localPath)`.
 >
 > ```ts
 > // Before
 > await sandbox.filesystem.download_file(localPath, remotePath);
+> const info = await sandbox.filesystem.read_file('/data/x'); // { content: 'hello', ... }
 >
 > // After — same argument order as Python and the CLI
 > await sandbox.filesystem.download_file(remotePath, localPath);
+> const text = await sandbox.filesystem.read_file('/data/x'); // 'hello'
 > ```
 
 ## Snapshots
@@ -390,6 +396,23 @@ TypeScript type.
 | -------------- | --------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | `get_domain()` | Full URL including protocol: `https://<domain>/…`  | Bare domain without protocol: `<domain>/…`                  | Documented divergence — kept as-is; aligning would be a breaking change for callers relying on the full URL. |
 | `exec()` result | Exit status is `code`; no `status`/`args` fields    | `CommandResult` spells it `exit_code` and adds `status`, `args` | Documented divergence — kept as-is; `SandboxCommandError.exit_code` exposes the Python spelling on errors.    |
+| `write_file` bytes | Content *is* the bytes: `string` encodes UTF-8, `Uint8Array`/`Blob`/streams stream as-is | `encoding="base64"` transports pre-encoded text | Documented divergence — decode base64 to `Uint8Array` before writing; a base64 string would land as its text. |
+| `write_files` | Text-only entries, written concurrently | Per-file `encoding`, written sequentially | Documented divergence — write binary entries with `write_file` directly. |
+| `read_file` result | Returns the content directly: a string, or a `Uint8Array` | Returns `FileInfo` (`{ content, encoding }`) | Documented divergence — the breaking change the CHANGELOG warning describes. |
+| Legacy error wording | Carries the executor's raw error text: `"read_file failed: … (path: …)"` | Pins per-operation wording: `"File not found: {path}"`, `"Directory not empty: {path}"`, … | Documented divergence — the error class is the cross-SDK contract; message text differs (delete_dir's not-empty keeps the same class). |
+| Direct streamed calls | `filesPut`/`filesRead` surface raw fetch failures; the filesystem layer classifies them | `executor_client` wraps request errors as `SandboxError` | Documented divergence — catch the filesystem operations, not the transport seams. |
+| Invalid UTF-8 read | Wraps as `SandboxFilesystemError` ("Failed to read file: …") | Raises the raw `UnicodeDecodeError` | Documented divergence — both refuse garbage; JS keeps the filesystem taxonomy closed. The same applies on the upload seam (`upload_file` with invalid bytes for the requested encoding). |
+| `mkdir` recursive flag | Sends `{ path, recursive }`; the executor always creates parents | Sends `{ path }` only; parents are always created automatically | Documented divergence — pre-existing wire shape; the flag is redundant but harmless. |
+| Read encodings | `'utf-8' \| 'base64' \| null` only | Any codec Python's `bytes.decode` accepts (`latin-1`, …) | Documented divergence — decode to bytes yourself for other codecs. |
+| `open_read()` | Named `read_stream(path)` — same async iteration of chunks | `open_read` (`open()` is the tabled file-like surface) | Documented divergence — the rename carries the JS naming convention. |
+| Legacy base64 strictness | `base64Decode` refuses non-alphabet input (fail-fast) | `base64.b64decode(..., validate=False)` discards non-alphabet chars | Documented divergence — garbage in fails loudly instead of decoding wrong bytes. |
+| Legacy downloads | Write directly to `localPath` (single in-memory write) | Same — direct write on the legacy routes | Documented divergence — the `.part`+rename safety applies to the streamed routes; a crash mid-download on legacy can leave a partial file. |
+| Reply validation | Fails fast on malformed replies — missing `content`, bad stat shape, and a streamed PUT 200 without `sha256` | Tolerates missing fields (`response.get("content", "")`) | Documented divergence — garbage in fails loudly instead of reading as an empty file or a false corruption claim. |
+| Legacy write wire | Sends the base64 text with no `is_base64` flag, mirroring Python | `content` string only, no flag | Documented divergence — byte-exact round-trip through this SDK (`write_file` bytes → `read_file` `{encoding: 'base64'}`). |
+| Streamed connect phase | Bounds connect at the same 60 s as the rest of the transfer | `httpx.Timeout(…, connect=30)` caps connect at 30 s | Documented divergence — a dead connect fails 30 s later in JS. |
+| Download stat validation | Requires the full stat shape at the download seam (fail-fast on garbage) | Reads only the `size` field | Documented divergence — the executor always returns the full shape. |
+| `open()` | Not implemented | `SandboxFileIO` file-like object | Documented divergence — `read_file`/`write_file`/`read_stream` cover the surface. |
+| Streamed PUT retry | Never retried: a stream cannot be replayed | Connect-time failures retry | Documented divergence — retry at the call site if a cold-start PUT fails. |
 
 ## Contributing
 

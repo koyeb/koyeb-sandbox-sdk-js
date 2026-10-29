@@ -41,7 +41,11 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-/** A sandbox whose executor `request` transport is a resettable mock. */
+/** A sandbox whose executor `request` transport is a resettable mock.
+ *
+ * The /files-routes probe is pinned to false, so filesystem tests exercise
+ * the legacy JSON routes — the arms whose behavior these tests pin.
+ */
 function sandboxWithMockedRequest(): { sandbox: Sandbox; request: Mock } {
   const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
   const request: Mock = vi.fn();
@@ -49,6 +53,7 @@ function sandboxWithMockedRequest(): { sandbox: Sandbox; request: Mock } {
   beforeEach(() => {
     request.mockReset();
     vi.spyOn(sandbox as never, 'request').mockImplementation(request as never);
+    vi.spyOn(sandbox as never, 'hasFilesRoutes').mockResolvedValue(false);
   });
 
   return { sandbox, request };
@@ -197,10 +202,7 @@ describe('filesystem executor error mapping', () => {
   it('leaves successful responses untouched', async () => {
     request.mockResolvedValue({ content: 'hello', encoding: 'utf-8' });
 
-    await expect(sandbox.filesystem.read_file('/data/x')).resolves.toEqual({
-      content: 'hello',
-      encoding: 'utf-8',
-    });
+    await expect(sandbox.filesystem.read_file('/data/x')).resolves.toBe('hello');
   });
 
   it('list_dir defaults to an empty list when the executor omits entries', async () => {

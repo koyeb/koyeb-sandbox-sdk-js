@@ -828,9 +828,10 @@ export class SandboxFilesystem {
         // signal, which is likely already aborted and would strand the
         // executor's temp file (the request stays bounded by its own cap).
         await this.sandbox.filesUploadAbort(uploadId);
-      } catch (abortError) {
-        if (!(abortError instanceof SandboxError)) throw abortError;
-        // A SandboxError from the abort never masks the failure that caused it.
+      } catch {
+        // The abort's own failures never mask the failure that caused it
+        // (Python parity: swallowed unconditionally — a raw error from the
+        // cleanup must not replace the cause either).
       }
       throw error;
     }
@@ -1050,7 +1051,7 @@ export class SandboxFilesystem {
     };
 
     for (;;) {
-      const start = done;
+      let start = done;
       const resumable = done > 0 && etag !== undefined;
       let failed: unknown;
       let ended = false;
@@ -1064,8 +1065,12 @@ export class SandboxFilesystem {
           },
         );
         if (reply.status === 200 && resumable) {
-          // If-Range missed: the file changed under us — start over.
+          // If-Range missed: the file changed under us — start over. The
+          // restart discards the resume base, so the budget measures this
+          // attempt from zero: one that lands nothing under the fresh body
+          // spends it, never a phantom progress reset.
           await restartFromScratch();
+          start = done;
         }
         if (reply.status !== 206) {
           etag = reply.etag; // the fresh validator; a 206 keeps the matched one

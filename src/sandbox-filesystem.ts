@@ -1028,6 +1028,9 @@ export class SandboxFilesystem {
    * the executor answering — it surfaces; attempts that land no bytes back
    * off and retry up to DOWNLOAD_STALLED_RETRIES times, the transport's own
    * budget; a landing attempt resets it, so a moving transfer keeps going.
+   * A file without a validator cannot keep what landed — its restarts
+   * discard the bytes, so they count against the budget too: a stream that
+   * keeps dying mid-body surfaces instead of looping forever.
    */
   private async streamWithResume(
     remote_path: string,
@@ -1085,8 +1088,16 @@ export class SandboxFilesystem {
 
       if (ended && (total === 0 || done >= total)) return done;
 
-      // The attempt failed or ended short — resume by what landed.
-      if (done === start) {
+      // The attempt failed or ended short — resume by what landed. A file
+      // without a validator cannot keep its bytes: the restart discards
+      // them, so the attempt made no net progress and spends the budget
+      // like a landed-nothing one — or a dying stream loops forever, always
+      // "progressing" and never surfacing.
+      const discards = done > 0 && etag === undefined;
+      if (discards) {
+        await restartFromScratch();
+      }
+      if (done === start || discards) {
         stalled += 1;
         if (stalled > DOWNLOAD_STALLED_RETRIES) {
           throw (
@@ -1098,13 +1109,9 @@ export class SandboxFilesystem {
         continue;
       }
 
-      // Bytes landed: progress resets the budget.
+      // Bytes landed and are kept: progress resets the budget.
       stalled = 0;
       backoff = DEFAULT_EXECUTOR_RETRY_DELAY_MS;
-      if (done > 0 && etag === undefined) {
-        // No validator to resume under: restart clean rather than double bytes.
-        await restartFromScratch();
-      }
     }
   }
 }

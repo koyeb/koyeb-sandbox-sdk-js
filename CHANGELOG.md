@@ -96,5 +96,7 @@ it as parts. Downloads resume after a network error instead of starting over.
 - `download_file(remotePath, localPath)` resumes by default: after a network error
   the remaining bytes are fetched with `Range` + `If-Range` on the executor's strong
   ETag — received bytes are never re-sent; a file that changed under us restarts the
-  `.part` from scratch. Attempts that land nothing back off and surface after 3
-  retries; a transfer that keeps moving keeps going
+  `.part` from scratch. Attempts that make no net progress back off and surface
+  after 3 retries; a transfer that keeps moving keeps going — a file without a
+  validator cannot keep what landed, so its restarts spend the same budget
+  instead of looping forever

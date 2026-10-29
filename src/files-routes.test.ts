@@ -312,6 +312,37 @@ describe('files_upload_open', () => {
     expect(error).toBeInstanceOf(SandboxRequestError);
     expect((error as SandboxRequestError).status_code).toBe(400);
   });
+
+  it('surfaces a fired timeout as the named 30s cap, never retried', async () => {
+    vi.useFakeTimers();
+    const send = hangingSend();
+    const gateway = new ExecutorGateway(send, { name: 'sbx' });
+
+    const pending = gateway.filesUploadOpen('/tmp/a.bin', 1024);
+    const errorPromise = pending.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const error = await errorPromise;
+
+    expect(error).toBeInstanceOf(SandboxTimeoutError);
+    expect((error as Error).message).toBe('Request timed out after 30s');
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors the caller's signal: the raw abort surfaces, never retried", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const send = hangingSend();
+    const gateway = new ExecutorGateway(send, { name: 'sbx' });
+
+    const pending = gateway.filesUploadOpen('/tmp/a.bin', 1024, { signal: controller.signal });
+    const errorPromise = pending.catch((error: unknown) => error);
+    setTimeout(() => controller.abort(), 1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const error = await errorPromise;
+
+    expect((error as Error).name).toBe('AbortError');
+    expect(send).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('files_upload_part', () => {

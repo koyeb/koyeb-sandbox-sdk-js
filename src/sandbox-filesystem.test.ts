@@ -1334,6 +1334,49 @@ describe('upload_file 409 resume', () => {
       await rm(local, { force: true });
     }
   });
+
+  // A 409 is the resume signal only while its ranges parse as half-open
+  // integer spans: anything malformed is an unusable reply — never a fill
+  // loop, never an Exists. One test per malformed shape, Python parity for
+  // the boundary the executor's body crosses.
+  const unusable409 = async (raw409Body: string) => {
+    const fake = uploadFake({ neverRecord: [4], raw409Body });
+    const local = await tempFile(DATA12);
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain('missing-ranges reply was unusable');
+      expect(error).not.toBeInstanceOf(SandboxFileExistsError);
+      expect(fake.kinds()).toContain('abort');
+      expect(fake.kinds().filter((kind) => kind === 'complete')).toHaveLength(1); // no second complete on an unusable reply
+    } finally {
+      await rm(local, { force: true });
+    }
+  };
+
+  it('treats a non-integer start as unusable', async () => {
+    await unusable409('{"error": "incomplete", "ranges": [{"start": 1.5, "end": 4}]}');
+  });
+
+  it('treats a non-integer end as unusable', async () => {
+    await unusable409('{"error": "incomplete", "ranges": [{"start": 4, "end": 8.5}]}');
+  });
+
+  it('treats an inverted range as unusable', async () => {
+    await unusable409('{"error": "incomplete", "ranges": [{"start": 8, "end": 4}]}');
+  });
+
+  it('treats a negative start as unusable', async () => {
+    await unusable409('{"error": "incomplete", "ranges": [{"start": -4, "end": 4}]}');
+  });
+
+  it('treats a missing ranges key as unusable', async () => {
+    await unusable409('{"error": "incomplete"}');
+  });
+
+  it('treats an empty ranges array as unusable', async () => {
+    await unusable409('{"error": "incomplete", "ranges": []}');
+  });
 });
 
 describe('upload_file multipart progress', () => {
@@ -1645,6 +1688,40 @@ describe('download_file resume', () => {
 
     const rangeCalls = port.calls.filter((call) => call[0] === 'files_read_range');
     expect(rangeCalls[1].slice(2)).toEqual([undefined, undefined]); // restart: no Range without a validator
+  });
+
+  it('counts a validator-less discard against the stall budget: a stream that keeps dying mid-body surfaces', async () => {
+    // Only the timeout functions are faked — the download's fs IO completes
+    // on real loop turns, which a fully faked clock starves (see the
+    // stalled-budget test above).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const dyingAttempt = () => ({ chunks: [encoder.encode('abc')], failWith: new TypeError('socket hang up') });
+    const port = fakePort({
+      hasFilesRoutes: true,
+      filesStat: { type: 'other', size: 0, mode: '0644', mtime: '2026-01-01T00:00:00Z' },
+      filesReadRange: [dyingAttempt(), dyingAttempt(), dyingAttempt(), dyingAttempt()],
+    });
+    const dir = await tempDir();
+    const target = join(dir, 'out.bin');
+
+    try {
+      const pending = fsOf(port).download_file('/proc/cpuinfo', target).catch((e: unknown) => e);
+      let error: unknown = 'unsettled';
+      for (let i = 0; i < 32 && error === 'unsettled'; i++) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await new Promise((resolve) => setImmediate(resolve));
+        error = await Promise.race([pending, 'unsettled']);
+      }
+
+      // Each attempt lands bytes, but the validator-less restart discards
+      // them: no net progress, so the budget must spend and surface — the
+      // raw bytes never double, and the loop never spins forever.
+      expect(error).toBeInstanceOf(SandboxFilesystemError);
+      expect((error as Error).message).toContain('socket hang up');
+      expect(port.calls.filter((call) => call[0] === 'files_read_range')).toHaveLength(4); // 1 + the 3 budget
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('surfaces a caller abort raw and leaves no .part', async () => {

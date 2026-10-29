@@ -644,6 +644,22 @@ describe('buildArchive and extractArchive', () => {
     });
   });
 
+  it('refuses a file that outgrows its header mid-archive', async () => {
+    await withTmpDir(async (root) => {
+      const src = join(root, 'src');
+      const archive = join(root, 'batch.tgz');
+      await mkdir(src);
+      // /dev/zero stats as 0 bytes but reads forever: the deterministic
+      // stand-in for a file growing between the stat and the stream.
+      await symlink('/dev/zero', join(src, 'zero'));
+      const entries: SyncEntry[] = [
+        { path: 'zero', type: 'file', size: 0, mode: '0644', mtime: formatMtime(0n) },
+      ];
+
+      await expect(buildArchive(src, entries, archive)).rejects.toThrow(/changed while it was archived/);
+    });
+  });
+
   it('extraction replaces members in the way', async () => {
     await withTmpDir(async (root) => {
       const src = join(root, 'src');

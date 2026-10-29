@@ -640,18 +640,12 @@ export async function buildArchive(root: string, entries: SyncEntry[], dest: str
       if (member.type === 'file') {
         let sent = 0;
         for await (const chunk of createReadStream(joinLocal(root, entry.path))) {
-          // A concurrent writer cannot be allowed to overflow the header's
-          // size; extra bytes would desynchronize the next member.
           const take = chunk as Buffer;
-          const room = member.size - sent;
-          if (take.length > room) {
-            yield take.subarray(0, room);
-            sent = member.size;
-            break;
+          if (sent + take.length > member.size) {
+            throw new Error(`file changed while it was archived: ${entry.path}`);
           }
           yield take;
           sent += take.length;
-          if (sent === member.size) break;
         }
         if (sent < member.size) {
           throw new Error(`file changed while it was archived: ${entry.path}`);

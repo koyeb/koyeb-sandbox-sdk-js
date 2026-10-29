@@ -40,6 +40,16 @@ type Overrides = {
   filesPut?: unknown;
   filesRead?: unknown;
   filesStat?: unknown;
+  /** One entry per filesReadRange call, consumed in order (the resume script). */
+  filesReadRange?: RangeAttempt[];
+};
+
+/** One scripted GET /files reply: chunks yield, then failWith throws mid-stream. */
+type RangeAttempt = {
+  status?: number;
+  etag?: string;
+  chunks?: Uint8Array[];
+  failWith?: unknown;
 };
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
@@ -123,10 +133,23 @@ function fakePort(overrides: Overrides = {}): FakePort {
       if (reply instanceof Error) throw reply;
       return reply ?? {};
     }),
-    // The ranged seam download_file rides; by default it serves the legacy
-    // filesRead override (chunks array or Error) as a 200 with a fixed etag.
+    // The ranged seam download_file rides; scripted attempts come from the
+    // filesReadRange override, the default serves the filesRead override
+    // (chunks array or Error) as a 200 with a fixed etag.
     filesReadRange: vi.fn(async (path: string, options?: { range?: string; ifRange?: string }) => {
       calls.push(['files_read_range', path, options?.range, options?.ifRange]);
+      const scripted = overrides.filesReadRange;
+      if (Array.isArray(scripted)) {
+        const attempt = scripted.shift() ?? { status: 200, chunks: [] };
+        return {
+          status: attempt.status ?? 200,
+          etag: attempt.etag,
+          stream: (async function* () {
+            for (const chunk of attempt.chunks ?? []) yield chunk;
+            if (attempt.failWith !== undefined) throw attempt.failWith;
+          })(),
+        };
+      }
       const reply = overrides.filesRead;
       if (reply instanceof Error) throw reply;
       const chunks = (Array.isArray(reply) ? reply : [reply ?? new Uint8Array(0)]) as Uint8Array[];
@@ -1483,6 +1506,179 @@ describe('download_file on the new routes', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('download_file resume', () => {
+  const CONTENT = encoder.encode('abcdefghijkl');
+  const STAT = { type: 'file', size: CONTENT.length, mode: '0644', mtime: '2026-01-01T00:00:00Z' };
+
+  /** The port with a scripted filesReadRange sequence and a fixed stat. */
+  function resumePort(attempts: RangeAttempt[], stat: unknown = STAT) {
+    const port = fakePort({ hasFilesRoutes: true, filesReadRange: attempts, filesStat: stat as never });
+    return port;
+  }
+
+  async function withTarget(fn: (target: string) => Promise<void>): Promise<void> {
+    const dir = await tempDir();
+    try {
+      await fn(join(dir, 'out.bin'));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('resumes with Range + If-Range after a mid-stream network error, byte-identical', async () => {
+    const port = resumePort([
+      { etag: '"v1"', chunks: [encoder.encode('abc')], failWith: new TypeError('socket hang up') },
+      { status: 206, etag: '"v1"', chunks: [encoder.encode('defghijkl')] },
+    ]);
+
+    await withTarget(async (target) => {
+      await fsOf(port).download_file('/remote.bin', target);
+      expect(new Uint8Array(await readFile(target))).toEqual(CONTENT);
+      expect(existsSync(`${target}.part`)).toBe(false);
+    });
+
+    const rangeCalls = port.calls.filter((call) => call[0] === 'files_read_range');
+    expect(rangeCalls).toHaveLength(2);
+    expect(rangeCalls[0].slice(2)).toEqual([undefined, undefined]); // the first GET: no resume headers
+    expect(rangeCalls[1].slice(2)).toEqual(['bytes=3-', '"v1"']);
+  });
+
+  it('restarts from scratch when If-Range misses: the file changed under us', async () => {
+    const fresh = encoder.encode('XYZ-NEW-CONTENT');
+    const port = fakePort({
+      hasFilesRoutes: true,
+      filesStat: { type: 'file', size: fresh.length, mode: '0644', mtime: '2026-01-02T00:00:00Z' },
+      filesReadRange: [
+        { etag: '"v1"', chunks: [encoder.encode('abc')], failWith: new TypeError('socket hang up') },
+        { status: 200, etag: '"v2"', chunks: [fresh] },
+      ],
+    });
+
+    await withTarget(async (target) => {
+      await fsOf(port).download_file('/remote.bin', target);
+      expect(new Uint8Array(await readFile(target))).toEqual(fresh); // the old bytes never survived
+    });
+
+    const rangeCalls = port.calls.filter((call) => call[0] === 'files_read_range');
+    expect(rangeCalls[1].slice(2)).toEqual(['bytes=3-', '"v1"']); // it asked to resume
+  });
+
+  it('resumes a short read: the stream ended before the stat size', async () => {
+    const port = resumePort([
+      { etag: '"v1"', chunks: [encoder.encode('abc')] }, // ends cleanly at 3 < 12
+      { status: 206, etag: '"v1"', chunks: [encoder.encode('defghijkl')] },
+    ]);
+
+    await withTarget(async (target) => {
+      await fsOf(port).download_file('/remote.bin', target);
+      expect(new Uint8Array(await readFile(target))).toEqual(CONTENT);
+    });
+
+    expect(port.calls.filter((call) => call[0] === 'files_read_range').length).toBe(2);
+  });
+
+  it('surfaces a 4xx mid-download without retrying: the executor answered', async () => {
+    const port = resumePort([
+      { etag: '"v1"', chunks: [encoder.encode('abc')], failWith: statusError(400, '{"error": "bad range"}') },
+    ]);
+
+    await withTarget(async (target) => {
+      const error = await fsOf(port).download_file('/remote.bin', target).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(SandboxFilesystemError);
+      expect((error as Error).message).toContain('bad range');
+      expect(existsSync(`${target}.part`)).toBe(false);
+    });
+
+    expect(port.calls.filter((call) => call[0] === 'files_read_range')).toHaveLength(1);
+  });
+
+  it('surfaces the last failure after the stalled budget is spent', async () => {
+    // Only the timeout functions are faked — the download's fs IO (open,
+    // close, rm) completes on real loop turns, which a fully faked clock
+    // starves between advances.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const port = resumePort([
+      { etag: '"v1"', failWith: new TypeError('socket hang up') },
+      { status: 206, etag: '"v1"', failWith: new TypeError('socket hang up') },
+      { status: 206, etag: '"v1"', failWith: new TypeError('socket hang up') },
+      { status: 206, etag: '"v1"', failWith: new TypeError('socket hang up') },
+    ]);
+    const dir = await tempDir();
+    const target = join(dir, 'out.bin');
+
+    try {
+      const pending = fsOf(port).download_file('/remote.bin', target).catch((e: unknown) => e);
+      // Drive the fake clock until the budget is spent: each iteration also
+      // yields a real macrotask turn so the chain's fs IO can complete.
+      let error: unknown = 'unsettled';
+      for (let i = 0; i < 32 && error === 'unsettled'; i++) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await new Promise((resolve) => setImmediate(resolve));
+        error = await Promise.race([pending, 'unsettled']);
+      }
+
+      expect(error).toBeInstanceOf(SandboxFilesystemError);
+      expect((error as Error).message).toContain('socket hang up');
+      expect(port.calls.filter((call) => call[0] === 'files_read_range')).toHaveLength(4); // 1 + 3 retries
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('restarts from scratch when a file without a validator fails mid-stream (pseudo-files)', async () => {
+    const port = fakePort({
+      hasFilesRoutes: true,
+      filesStat: { type: 'other', size: 0, mode: '0644', mtime: '2026-01-01T00:00:00Z' },
+      filesReadRange: [
+        { chunks: [encoder.encode('abc')], failWith: new TypeError('socket hang up') }, // no etag
+        { chunks: [encoder.encode('abcdef')] }, // the whole content again
+      ],
+    });
+
+    await withTarget(async (target) => {
+      await fsOf(port).download_file('/proc/cpuinfo', target);
+      expect(new Uint8Array(await readFile(target))).toEqual(encoder.encode('abcdef')); // no doubled bytes
+    });
+
+    const rangeCalls = port.calls.filter((call) => call[0] === 'files_read_range');
+    expect(rangeCalls[1].slice(2)).toEqual([undefined, undefined]); // restart: no Range without a validator
+  });
+
+  it('surfaces a caller abort raw and leaves no .part', async () => {
+    const port = resumePort([
+      { etag: '"v1"', chunks: [encoder.encode('abc')], failWith: new DOMException('aborted', 'AbortError') },
+    ]);
+
+    await withTarget(async (target) => {
+      const error = await fsOf(port).download_file('/remote.bin', target).catch((e: unknown) => e);
+      expect((error as Error).name).toBe('AbortError');
+      expect(existsSync(`${target}.part`)).toBe(false);
+    });
+
+    expect(port.calls.filter((call) => call[0] === 'files_read_range')).toHaveLength(1); // aborts never retry
+  });
+
+  it('reports progress across the resume, monotone to the full size', async () => {
+    const port = resumePort([
+      { etag: '"v1"', chunks: [encoder.encode('abc')], failWith: new TypeError('socket hang up') },
+      { status: 206, etag: '"v1"', chunks: [encoder.encode('defghijkl')] },
+    ]);
+    const seen: Array<[number, number]> = [];
+
+    await withTarget(async (target) => {
+      await fsOf(port).download_file('/remote.bin', target, {
+        progress: (done, total) => seen.push([done, total]),
+      });
+      expect(new Uint8Array(await readFile(target))).toEqual(CONTENT);
+    });
+
+    expect(seen[seen.length - 1]).toEqual([12, 12]);
+    const dones = seen.map(([done]) => done);
+    expect(dones).toEqual([...dones].sort((a, b) => a - b));
+    for (const [done, total] of seen) expect(done).toBeLessThanOrEqual(total);
   });
 });
 

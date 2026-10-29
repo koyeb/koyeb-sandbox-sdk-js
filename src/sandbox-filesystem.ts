@@ -17,8 +17,16 @@ import type {
   FilesUploadSession,
   FilesUploadStatus,
 } from './executor-gateway.js';
-import { FILES_PROGRESS_INTERVAL_MS, UPLOAD_CONCURRENCY, UPLOAD_PART_SIZE } from './constants.js';
+import {
+  DEFAULT_EXECUTOR_RETRY_DELAY_MS,
+  DOWNLOAD_STALLED_RETRIES,
+  FILES_PROGRESS_INTERVAL_MS,
+  UPLOAD_CONCURRENCY,
+  UPLOAD_PART_SIZE,
+} from './constants.js';
+import { wait } from './time.js';
 import { shellQuote } from './shell.js';
+import type { FileHandle } from 'node:fs/promises';
 
 /**
  * Filesystem operations for Koyeb Sandbox instances.
@@ -958,8 +966,11 @@ export class SandboxFilesystem {
    *
    * On executors v0.0.24+ the size comes from stat (never a HEAD), the bytes
    * stream into `<local>.part` and rename into place on success: a failed
-   * download leaves the destination exactly as it was. Older executors
-   * keep the legacy JSON routes with the base64 transport.
+   * download leaves the destination exactly as it was. Resume is on by
+   * default: after a network error the remaining bytes are fetched with
+   * `Range` + `If-Range` on the executor's strong ETag, so received bytes are
+   * never re-sent; a file that changed under us restarts from scratch. Older
+   * executors keep the legacy JSON routes with the base64 transport.
    *
    * The transfer is bounded by a 60 s idle timeout only; a slow transfer
    * that keeps moving is never cut off.
@@ -987,14 +998,10 @@ export class SandboxFilesystem {
         const entry = requireStatEntry(await this.sandbox.filesStat(remote_path));
         const reporter = new ProgressReporter(options.progress, entry.size);
 
-        let done = 0;
         const handle = await fs.open(part_path, 'w');
+        let done: number;
         try {
-          for await (const chunk of this.sandbox.filesRead(remote_path, { signal: options.signal })) {
-            await handle.write(chunk);
-            done += chunk.byteLength;
-            reporter.update(done);
-          }
+          done = await this.streamWithResume(remote_path, entry.size, handle, reporter, options.signal);
         } finally {
           await handle.close();
         }
@@ -1006,6 +1013,97 @@ export class SandboxFilesystem {
     } finally {
       if (!renamed) {
         await fs.rm(part_path, { force: true }).catch(() => {});
+      }
+    }
+  }
+
+  /** Stream the bytes into `handle`, resuming after a failure.
+   *
+   * One attempt is one ranged GET. Bytes land at their offset (position =
+   * done), so a resume appends exactly where the last attempt stopped. The
+   * strong ETag is the resume validator: an If-Range match yields a 206 slice,
+   * a miss (the file changed) a 200 whole body — the part file restarts from
+   * scratch. Files without a validator (size-0 pseudo-files) cannot resume:
+   * their failures also restart from scratch, never doubling bytes. A 4xx is
+   * the executor answering — it surfaces; attempts that land no bytes back
+   * off and retry up to DOWNLOAD_STALLED_RETRIES times, the transport's own
+   * budget; a landing attempt resets it, so a moving transfer keeps going.
+   */
+  private async streamWithResume(
+    remote_path: string,
+    total: number,
+    handle: FileHandle,
+    reporter: ProgressReporter,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    let done = 0;
+    let etag: string | undefined;
+    let stalled = 0;
+    let backoff = DEFAULT_EXECUTOR_RETRY_DELAY_MS;
+
+    const restartFromScratch = async () => {
+      await handle.truncate(0);
+      done = 0;
+    };
+
+    for (;;) {
+      const start = done;
+      const resumable = done > 0 && etag !== undefined;
+      let failed: unknown;
+      let ended = false;
+
+      try {
+        const reply = await this.sandbox.filesReadRange(
+          remote_path,
+          {
+            ...(resumable ? { range: `bytes=${done}-`, ifRange: etag } : {}),
+            signal,
+          },
+        );
+        if (reply.status === 200 && resumable) {
+          // If-Range missed: the file changed under us — start over.
+          await restartFromScratch();
+        }
+        if (reply.status !== 206) {
+          etag = reply.etag; // the fresh validator; a 206 keeps the matched one
+        }
+        for await (const chunk of reply.stream) {
+          // Position-pinned writes: a resume appends where the bytes stopped,
+          // and a truncate-then-restart leaves no hole.
+          await handle.write(chunk, 0, chunk.byteLength, done);
+          done += chunk.byteLength;
+          reporter.update(done);
+        }
+        ended = true;
+      } catch (error) {
+        if (isAbort(error)) throw error;
+        if (error instanceof SandboxRequestError && !(error instanceof SandboxServiceError)) {
+          throw error; // 4xx: the executor answered; a retry cannot change it
+        }
+        failed = error;
+      }
+
+      if (ended && (total === 0 || done >= total)) return done;
+
+      // The attempt failed or ended short — resume by what landed.
+      if (done === start) {
+        stalled += 1;
+        if (stalled > DOWNLOAD_STALLED_RETRIES) {
+          throw (
+            failed ?? new SandboxFilesystemError('Download made no progress: the stream keeps ending short')
+          );
+        }
+        await wait(backoff, signal);
+        backoff *= 2;
+        continue;
+      }
+
+      // Bytes landed: progress resets the budget.
+      stalled = 0;
+      backoff = DEFAULT_EXECUTOR_RETRY_DELAY_MS;
+      if (done > 0 && etag === undefined) {
+        // No validator to resume under: restart clean rather than double bytes.
+        await restartFromScratch();
       }
     }
   }

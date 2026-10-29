@@ -198,6 +198,8 @@ type UploadFakeOptions = {
   lieAboutSha?: string;
   raw409Body?: string;
   abortError?: boolean;
+  /** The abort throws a raw (non-Sandbox) error, like a malformed reply. */
+  abortRawError?: boolean;
   onPart?: (options: { signal?: AbortSignal }) => void | Promise<void>;
   omitCompleteSha?: boolean;
 };
@@ -345,6 +347,7 @@ function uploadFake(options: UploadFakeOptions = {}) {
     filesUploadAbort: vi.fn(async () => {
       calls.push(['abort']);
       if (options.abortError) throw statusError(404, '{"error": "unknown upload session"}');
+      if (options.abortRawError) throw new SyntaxError('Unexpected token in JSON');
       if (session === null) throw statusError(404, '{"error": "unknown upload session"}');
       session = null;
     }),
@@ -1260,6 +1263,24 @@ describe('upload_file abort on failure', () => {
     }
   });
 
+  it("lets a raw abort failure never mask the original part failure either", async () => {
+    // Python parity: the abort's own errors are swallowed unconditionally —
+    // a raw (non-Sandbox) abort error must not replace the cause either.
+    const fake = uploadFake({
+      failParts: { '0:4': statusError(400, '{"error": "sha256 mismatch on part"}') },
+      abortRawError: true,
+    });
+    const local = await tempFile(DATA12);
+
+    try {
+      const error = await fsOf(fake.port).upload_file(local, '/r/big.bin', { part_size: 4, concurrency: 1 }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain('sha256 mismatch on part');
+      expect(fake.kinds()).toContain('abort');
+    } finally {
+      await rm(local, { force: true });
+    }
+  });
+
   it('names the restart when the session was lost (a 404 on a part)', async () => {
     const fake = uploadFake({
       failParts: { '0:4': statusError(404, '{"error": "unknown upload session"}') },
@@ -1688,6 +1709,46 @@ describe('download_file resume', () => {
 
     const rangeCalls = port.calls.filter((call) => call[0] === 'files_read_range');
     expect(rangeCalls[1].slice(2)).toEqual([undefined, undefined]); // restart: no Range without a validator
+  });
+
+  it('spends the budget when an If-Range miss dies before its first chunk', async () => {
+    // The resume attempt gets a 200 (the file changed), the restart discards
+    // the resume base, and the fresh body dies before landing anything: that
+    // attempt made no net progress — it must spend the stall budget, not
+    // reset it as phantom progress.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const dies = () => ({ status: 200, etag: '"v2"', failWith: new TypeError('socket hang up') });
+    const port = fakePort({
+      hasFilesRoutes: true,
+      filesStat: { type: 'file', size: 12, mode: '0644', mtime: '2026-01-01T00:00:00Z' },
+      filesReadRange: [
+        { etag: '"v1"', chunks: [encoder.encode('abc')], failWith: new TypeError('socket hang up') },
+        dies(),
+        dies(),
+        dies(),
+        dies(),
+      ],
+    });
+    const dir = await tempDir();
+    const target = join(dir, 'out.bin');
+
+    try {
+      const pending = fsOf(port).download_file('/remote.bin', target).catch((e: unknown) => e);
+      let error: unknown = 'unsettled';
+      for (let i = 0; i < 32 && error === 'unsettled'; i++) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await new Promise((resolve) => setImmediate(resolve));
+        error = await Promise.race([pending, 'unsettled']);
+      }
+
+      expect(error).toBeInstanceOf(SandboxFilesystemError);
+      expect((error as Error).message).toContain('socket hang up');
+      // 1 landing attempt + the miss that spends + 3 budget waits... the miss
+      // counts: 5 range calls total, never the phantom-reset 6.
+      expect(port.calls.filter((call) => call[0] === 'files_read_range')).toHaveLength(5);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('counts a validator-less discard against the stall budget: a stream that keeps dying mid-body surfaces', async () => {

@@ -75,7 +75,7 @@ export class DeclarativeSnapshot {
 
       for (const [src, dst] of this.copies) {
         this.operations.push(`copy: ${src} -> ${dst}`);
-        await this.copyLocal(src, dst);
+        await this.copyOne(src, dst);
       }
 
       for (const { command, cwd } of this.commands) {
@@ -105,14 +105,36 @@ export class DeclarativeSnapshot {
     }
   }
 
-  private async copyLocal(src: string, dst: string): Promise<void> {
+  /** Copy one local file or directory into the builder sandbox.
+   *
+   * On executors v0.0.24+ a directory travels as one archive push through
+   * filesystem.sync — binary-safe, with modes, mtimes and symlinks kept
+   * (the legacy per-file walk read files as text and lost all of that) —
+   * and a single file through the streamed upload_file (binary-safe; no
+   * probe needed — it carries its own legacy fallback). Old executors keep
+   * the per-file legacy walk, byte-for-byte.
+   */
+  private async copyOne(src: string, dst: string): Promise<void> {
     const fs = await import('node:fs/promises');
-    const stat = await fs.stat(src);
+    const st = await fs.stat(src);
 
-    if (stat.isFile()) {
-      await this.builder!.filesystem.write_file(dst, await fs.readFile(src, 'utf8'));
+    if (st.isDirectory()) {
+      // The probe is the builder sandbox's own seam; a fresh builder makes
+      // sync's push a full copy.
+      if (await this.builder!.hasFilesRoutes()) {
+        await this.builder!.filesystem.sync(src, dst);
+        return;
+      }
+      await this.copyDirectory(src, dst);
       return;
     }
+
+    await this.builder!.filesystem.upload_file(src, dst);
+  }
+
+  /** The legacy per-file walk, kept byte-for-byte for old executors. */
+  private async copyDirectory(src: string, dst: string): Promise<void> {
+    const fs = await import('node:fs/promises');
 
     for (const entry of await fs.readdir(src, { withFileTypes: true })) {
       const target = `${dst}/${entry.name}`;
@@ -120,7 +142,19 @@ export class DeclarativeSnapshot {
       if (entry.isDirectory()) {
         await this.builder!.filesystem.mkdir(target);
       }
-      await this.copyLocal(join(src, entry.name), target);
+      await this.copyTreeEntry(join(src, entry.name), target);
     }
+  }
+
+  /** One entry of the legacy walk: a file as text, a directory recursed. */
+  private async copyTreeEntry(src: string, dst: string): Promise<void> {
+    const fs = await import('node:fs/promises');
+    const st = await fs.stat(src);
+
+    if (st.isFile()) {
+      await this.builder!.filesystem.write_file(dst, await fs.readFile(src, 'utf8'));
+      return;
+    }
+    await this.copyDirectory(src, dst);
   }
 }

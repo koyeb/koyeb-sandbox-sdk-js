@@ -23,6 +23,27 @@ export const DEFAULT_CLAIM_RETRY_DELAY_MS = 1_000;
 
 // Executor 503 retries before surfacing SandboxServiceError (Python parity).
 export const DEFAULT_EXECUTOR_RETRIES = 3;
+
+// Idle bound for the streamed /files routes: a transfer that keeps moving is
+// never cut off, but 60 s without progress fails (executor routes v0.0.24+;
+// Python parity — a 5 GiB transfer must not die at the 30 s total cap).
+export const DEFAULT_FILES_IDLE_TIMEOUT = 60;
+
+// Minimum spacing between two progress(done, total) callbacks (Python parity).
+export const FILES_PROGRESS_INTERVAL_MS = 100;
+
+// Multipart uploads: a file larger than one request's budget goes up as
+// offset-addressed parts. The defaults follow the platform contract (Python
+// parity): 50 MiB parts — the executor caps at max_part_size — and 4 in
+// flight, so memory holds at most part_size x concurrency.
+export const UPLOAD_PART_SIZE = 50 * 1024 * 1024;
+export const UPLOAD_CONCURRENCY = 4;
+
+// Resumable downloads (JS slice — Python ST-126 deferred it): attempts that
+// land no new bytes retry with backoff up to this many times — the transport's
+// own retry budget — before the failure surfaces. An attempt that lands bytes
+// resets the budget: a transfer that keeps moving keeps going.
+export const DOWNLOAD_STALLED_RETRIES = 3;
 // Base backoff between executor retries; doubles with the attempt count.
 export const DEFAULT_EXECUTOR_RETRY_DELAY_MS = 1_000;
 

@@ -16,8 +16,7 @@ async function main() {
   await writeFile(local_file, 'This is a local file\nUploaded to Koyeb Sandbox!');
   await fs.upload_file(local_file, '/tmp/uploaded_file.txt');
 
-  const uploaded_info = await fs.read_file('/tmp/uploaded_file.txt');
-  console.log(uploaded_info.content);
+  console.log(await fs.read_file('/tmp/uploaded_file.txt'));
 
   await fs.write_file('/tmp/download_source.txt', 'Download test content\nMultiple lines');
   await fs.download_file('/tmp/download_source.txt', downloaded_file);

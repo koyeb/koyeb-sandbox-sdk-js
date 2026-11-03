@@ -16,7 +16,7 @@ async function main() {
   console.log(`Moved: ${await fs.exists('/tmp/test_dir/moved_file.txt')}`);
 
   const original_content = await fs.read_file('/tmp/renamed_file.txt');
-  await fs.write_file('/tmp/test_dir/copied_file.txt', original_content.content);
+  await fs.write_file('/tmp/test_dir/copied_file.txt', original_content);
   console.log(`Copied: ${await fs.exists('/tmp/test_dir/copied_file.txt')}`);
 
   await fs.rm('/tmp/renamed_file.txt');

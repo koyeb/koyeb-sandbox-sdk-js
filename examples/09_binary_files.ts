@@ -6,17 +6,15 @@ console.log(`Sandbox ID: ${sandbox.id}`);
 const fs = sandbox.filesystem;
 
 async function main() {
-  const binaryData = '\x00\x01\x02\x03\xff\xfe\xfd';
-  const base64Data = Buffer.from(binaryData).toString('base64');
-  await fs.write_file('/tmp/binary.bin', base64Data);
+  const binaryData = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0xff, 0xfe, 0xfd]);
+  await fs.write_file('/tmp/binary.bin', binaryData);
 
-  const fileInfo = await fs.read_file('/tmp/binary.bin');
-  const decoded = Buffer.from(fileInfo.content, 'base64').toString();
+  const decoded = await fs.read_file('/tmp/binary.bin', { encoding: null });
 
-  console.log('Original:', binaryData);
-  console.log('Decoded:', decoded);
+  console.log('Original:', Buffer.from(binaryData).toString('hex'));
+  console.log('Decoded:', Buffer.from(decoded).toString('hex'));
 
-  if (binaryData !== decoded) {
+  if (Buffer.compare(Buffer.from(binaryData), Buffer.from(decoded)) !== 0) {
     throw new Error('Decoded data does not match original');
   }
 }

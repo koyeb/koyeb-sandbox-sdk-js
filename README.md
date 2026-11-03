@@ -283,16 +283,19 @@ For callback-based streaming without event listeners, `exec` accepts `on_stdout`
 
 ## Filesystem Helpers
 
-Access via `sandbox.filesystem`. Operations run over the sandbox API and fall back to `exec` only when needed.
+Access via `sandbox.filesystem`. On executors v0.0.24+ the byte-moving operations run on the executor's streamed `/files` routes — binary-safe, constant memory, real bytes on disk for every content type — and older executors fall back to the legacy JSON routes automatically (one probe per sandbox handle, one warning). On the legacy path binary content rides the base64 transport, so it still round-trips byte-exact through this SDK.
 
 | Method                                 | Description                                           |
 | -------------------------------------- | ----------------------------------------------------- |
 | `mkdir(path, recursive?)`              | Create a directory.                                   |
 | `list_dir(path?)`                      | List entries inside a directory. Defaults to `.`.     |
+| `ls(path?)`                            | The short spelling of `list_dir` (Python parity).     |
 | `delete_dir(path)`                     | Delete a directory tree.                              |
-| `write_file(path, content)`            | Create or replace a text file.                        |
-| `write_files(files)`                   | Bulk write helper for multiple files.                 |
-| `read_file(path)`                      | Fetch `{ content, encoding }` for a remote file.      |
+| `write_file(path, content, options?)`  | Create or replace a file. `content`: string, `Uint8Array`, `Blob`, web `ReadableStream` or Node stream. `options.mode`: octal string like `'0644'` (streamed routes only; legacy keeps the destination's mode); `options.signal`: aborts mid-flight. |
+| `write_files(files)`                   | Bulk write helper for multiple text files.            |
+| `read_file(path, options?)`            | Read a file. `{ encoding: 'utf-8' }` (default) → string, `'base64'` → base64 of the real bytes on the streamed routes (decoded bytes on legacy), `null` → raw `Uint8Array`. |
+| `read_stream(path)`                    | Async-iterate a file's bytes chunk by chunk (constant memory). |
+| `stat(path)`                           | `{ type, size, mode, mtime, sha256? }` — requires the streamed routes (v0.0.24+). |
 | `rename_file(oldPath, newPath)`        | Rename using an internal `mv` command.                |
 | `move_file(src, dst)`                   | Move a file; maps `NO_SUCH_FILE` to `SandboxFileNotFoundError`. |
 | `delete_file(path)`                     | Delete a single file via the executor endpoint.       |
@@ -300,23 +303,64 @@ Access via `sandbox.filesystem`. Operations run over the sandbox API and fall ba
 | `exists(path)`                         | Return `true` if the path exists.                     |
 | `is_file(path)`                        | Return `true` if the path is a regular file.          |
 | `is_dir(path)`                         | Return `true` if the path is a directory.             |
-| `upload_file(localPath, remotePath)`   | Read a local file and upload it to the sandbox.       |
-| `download_file(remotePath, localPath)` | Download a sandbox file to your local disk.           |
+| `upload_file(localPath, remotePath, options?)`  | Stream a local file to the sandbox: `progress(done, total)` at most every 100 ms, `signal` honored mid-flight, sha256 verified end to end. Above `options.part_size` (default 50 MiB, capped by the executor's 100 MiB) the file uploads as a multipart session — `options.concurrency` parts in flight (default 4, memory = `part_size × concurrency`), timed-out parts split, missing ranges refilled from complete's 409. Legacy-only `options.encoding` picks the transport: `'utf-8'` (default) or `'base64'` (binary). |
+| `download_file(remotePath, localPath, options?)` | Stream a sandbox file to disk into `<local>.part`, renamed into place on success — resuming by default after a network error with `Range` + `If-Range` on the executor's strong ETag (received bytes are never re-sent; a file that changed restarts clean). Same options as the upload. |
+| `sync(localPath, remotePath?, options?)` | One-way directory sync, like `rsync -r` without deltas (executor v0.0.24+). See [Directory sync](#directory-sync) below. |
 
-> **Warning — breaking change:** `download_file` now takes `(remotePath, localPath)`,
-> matching the Python SDK and the CLI. Both transfers read their arguments in the
+> **Warning — breaking change:** `download_file` takes `(remotePath, localPath)`,
+> matching the Python SDK and the CLI, and `read_file` returns the content directly —
+> a string, or a `Uint8Array` with `{ encoding: null }` (and with `'base64'` on legacy
+> executors) — instead of the executor's
+> `{ content, encoding }` reply object. Both transfers read their arguments in the
 > direction of the transfer: `upload_file(localPath, remotePath)` and
-> `download_file(remotePath, localPath)`. Previously this SDK took
-> `download_file(localPath, remotePath)` — the opposite of every other Koyeb client —
-> so code ported from Python or the CLI silently wrote to the wrong path.
+> `download_file(remotePath, localPath)`.
 >
 > ```ts
 > // Before
 > await sandbox.filesystem.download_file(localPath, remotePath);
+> const info = await sandbox.filesystem.read_file('/data/x'); // { content: 'hello', ... }
 >
 > // After — same argument order as Python and the CLI
 > await sandbox.filesystem.download_file(remotePath, localPath);
+> const text = await sandbox.filesystem.read_file('/data/x'); // 'hello'
 > ```
+
+### Directory sync
+
+`sync(localPath, remotePath?, options?)` mirrors a directory between the local
+machine and the sandbox, one way — `rsync -r` without deltas:
+
+- `direction: 'push'` (the default) copies local → sandbox; `'pull'` copies sandbox → local
+- Both sides are listed and diffed on path, type, size and mtime (whole seconds,
+  like rsync's default); `checksum: true` adds a sha256 comparison for files that
+  pass that test
+- The changed set travels as ~50 MiB gzip'd tar batches through
+  `PUT /files/archive` (spooled per batch, so memory stays flat); a pull streams
+  `GET /files/archive` and extracts only the changed set. Files larger than one
+  batch ride `upload_file`/`download_file` (multipart, resumable) — a pull's archive
+  leaves them out so their bytes travel once
+- `delete: true` prunes destination entries the source lacks (topmost first, a
+  directory counts as one deletion); `exclude: ['*.log', '.git']` follows the
+  executor's `tar --exclude` semantics — a matching path or any `/`-separated
+  suffix of it is skipped, a matching directory whole. No default excludes
+- Symlinks travel as links, modes are kept, owners are not
+- `remotePath` defaults to the local path's relative form (its basename when
+  absolute), rsync-style; relative paths resolve under the sandbox workdir
+- A no-op sync sends nothing beyond the listing; `dry_run: true` computes the
+  plan without touching either side; `signal` aborts at the next transport call
+
+```ts
+// Push a local tree, pruning what the sandbox has that the source lacks
+const result = await sandbox.filesystem.sync('./site', 'site', { delete: true, exclude: ['node_modules'] });
+// { uploaded: 42, deleted: 3, skipped: 117, bytes: 1_048_576 }
+
+// Pull the sandbox's copy back, verifying content digests
+const back = await sandbox.filesystem.sync('./site', 'site', { direction: 'pull', checksum: true });
+// { downloaded: 0, deleted: 0, skipped: 162, bytes: 0 }
+```
+
+Requires executor v0.0.24+ (the streamed `/files` routes) — a legacy executor
+raises instead of silently transferring as text.
 
 ## Snapshots
 
@@ -352,6 +396,11 @@ const snapshot = await Sandbox.template('node-ci', 'node:22-slim', { workdir: '/
 
 const sandbox = await snapshot.spawn('runner');
 ```
+
+On executors v0.0.24+ a `copy()` of a directory travels as **one archive push**
+(`filesystem.sync`) — binary-safe, with modes, mtimes and symlinks kept — and a
+single file through the streamed `upload_file`. Older executors keep the
+legacy per-file walk.
 
 ## Error Types
 
@@ -390,6 +439,29 @@ TypeScript type.
 | -------------- | --------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | `get_domain()` | Full URL including protocol: `https://<domain>/…`  | Bare domain without protocol: `<domain>/…`                  | Documented divergence — kept as-is; aligning would be a breaking change for callers relying on the full URL. |
 | `exec()` result | Exit status is `code`; no `status`/`args` fields    | `CommandResult` spells it `exit_code` and adds `status`, `args` | Documented divergence — kept as-is; `SandboxCommandError.exit_code` exposes the Python spelling on errors.    |
+| `write_file` bytes | Content *is* the bytes: `string` encodes UTF-8, `Uint8Array`/`Blob`/streams stream as-is | `encoding="base64"` transports pre-encoded text | Documented divergence — decode base64 to `Uint8Array` before writing; a base64 string would land as its text. |
+| `write_files` | Text-only entries, written concurrently | Per-file `encoding`, written sequentially | Documented divergence — write binary entries with `write_file` directly. |
+| `read_file` result | Returns the content directly: a string, or a `Uint8Array` | Returns `FileInfo` (`{ content, encoding }`) | Documented divergence — the breaking change the CHANGELOG warning describes. |
+| Legacy error wording | Carries the executor's raw error text: `"read_file failed: … (path: …)"` | Pins per-operation wording: `"File not found: {path}"`, `"Directory not empty: {path}"`, … | Documented divergence — the error class is the cross-SDK contract; message text differs (delete_dir's not-empty keeps the same class). |
+| Direct streamed calls | `filesPut`/`filesRead` surface raw fetch failures; the filesystem layer classifies them | `executor_client` wraps request errors as `SandboxError` | Documented divergence — catch the filesystem operations, not the transport seams. |
+| Invalid UTF-8 read | Wraps as `SandboxFilesystemError` ("Failed to read file: …") | Raises the raw `UnicodeDecodeError` | Documented divergence — both refuse garbage; JS keeps the filesystem taxonomy closed. The same applies on the upload seam (`upload_file` with invalid bytes for the requested encoding). |
+| `mkdir` recursive flag | Sends `{ path, recursive }`; the executor always creates parents | Sends `{ path }` only; parents are always created automatically | Documented divergence — pre-existing wire shape; the flag is redundant but harmless. |
+| Read encodings | `'utf-8' \| 'base64' \| null` only | Any codec Python's `bytes.decode` accepts (`latin-1`, …) | Documented divergence — decode to bytes yourself for other codecs. |
+| `open_read()` | Named `read_stream(path)` — same async iteration of chunks | `open_read` (`open()` is the tabled file-like surface) | Documented divergence — the rename carries the JS naming convention. |
+| Legacy base64 strictness | `base64Decode` refuses non-alphabet input (fail-fast) | `base64.b64decode(..., validate=False)` discards non-alphabet chars | Documented divergence — garbage in fails loudly instead of decoding wrong bytes. |
+| Legacy downloads | Write directly to `localPath` (single in-memory write) | Same — direct write on the legacy routes | Documented divergence — the `.part`+rename safety applies to the streamed routes; a crash mid-download on legacy can leave a partial file. |
+| Reply validation | Fails fast on malformed replies — missing `content`, bad stat shape, and a streamed PUT 200 without `sha256` | Tolerates missing fields (`response.get("content", "")`) | Documented divergence — garbage in fails loudly instead of reading as an empty file or a false corruption claim. |
+| Legacy write wire | Sends the base64 text with no `is_base64` flag, mirroring Python | `content` string only, no flag | Documented divergence — byte-exact round-trip through this SDK (`write_file` bytes → `read_file` `{encoding: 'base64'}`). |
+| Streamed connect phase | Bounds connect at the same 60 s as the rest of the transfer | `httpx.Timeout(…, connect=30)` caps connect at 30 s | Documented divergence — a dead connect fails 30 s later in JS. |
+| `sync()` options | One options object: `{ direction, delete, exclude, checksum, dry_run, signal }` — an `AbortSignal` is the JS cancellation seam | Keyword-only args: `direction=`, `delete=`, `exclude=`, `checksum=`, `dry_run=` — no signal | Documented divergence — same semantics, JS calling convention; Python's per-call `timeout=` overrides are not ported anywhere in this SDK. |
+| `sync()` invalid direction | Raises `SandboxFilesystemError` (the filesystem taxonomy) | Raises a plain `ValueError` | Documented divergence — JS keeps the filesystem taxonomy closed; callers catch one family. |
+| Snapshot `copy` binary safety | On v0.0.24+ directories ride one archive push (`filesystem.sync`); single files ride `upload_file` | Same routes and arms (ST-127) | Aligned — Python's legacy walk read files as text; both SDKs now keep bytes, modes, mtimes and symlinks on new executors, and both keep the legacy walk for old ones. |
+| Download stat validation | Requires the full stat shape at the download seam (fail-fast on garbage) | Reads only the `size` field | Documented divergence — the executor always returns the full shape. |
+| `open()` | Not implemented | `SandboxFileIO` file-like object | Documented divergence — `read_file`/`write_file`/`read_stream` cover the surface. |
+| Streamed PUT retry | Never retried: a stream cannot be replayed | Connect-time failures retry | Documented divergence — retry at the call site if a cold-start PUT fails. |
+| Multipart open/complete retry | Never retried: fetch cannot prove a network error predated the executor seeing the request | Connect-time failures retry | Documented divergence — the safe side of the line: a blind retry would orphan a session or double-submit the commit. |
+| `upload_file` timeout override | `signal` (AbortSignal) cancels mid-flight; no per-call seconds override | `timeout=` seconds override wires into every session call | Documented divergence — the JS transfer seam is signal-based (ST-135's judgment); porting `timeout=` is a follow-up if callers ask. |
+| `download_file` resume | On by default: `Range` + `If-Range` on the strong ETag after a network error, restart on validator miss, 3-attempt no-progress budget | Not shipped in ST-126's PR (planned slice 3, deferred) | JS ahead — flagged for port-back to Python; the parity tests here pin the JS behavior. |
 
 ## Contributing
 

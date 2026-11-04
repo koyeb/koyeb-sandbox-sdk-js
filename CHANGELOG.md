@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Streaming `exec` retries a refused connect, as `stream: false` does
+
+`exec()` (streaming by default) and `exec_stream()` now send the command again when the
+connection fails before the request leaves (refused, unreachable, DNS), with the buffered
+route's backoff: 1, 2, 4 s, 3 retries. Nothing is retried once a response has come back
+(a 5xx, or a stream cut mid-way, may come after the command ran), after an abort, or when
+the next backoff would end past the command's `timeout`. A reset connection is not
+retried either: the executor may already have read the request. Python parity
+(koyeb-python-sdk#111).
+
+- ⚠️ A streaming `exec` to an endpoint that keeps refusing connections now fails after
+  ~7 s of retries instead of at once (or at its `timeout`, if shorter)
+
 ### Directory sync + snapshot copy on the archive routes (ST-137)
 
 `filesystem.sync(localPath, remotePath?, options)` mirrors a directory between the local

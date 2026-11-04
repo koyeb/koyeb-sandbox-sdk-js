@@ -61,8 +61,8 @@ export type CommandPort = {
     hooks?: { onAttempt?: () => void },
     options?: { timeout?: number },
   ) => Promise<any>;
-  /** Single authorized request with non-OK mapping (ExecutorGateway.raw). */
-  raw: (path: string, init: RequestInit, body?: unknown) => Promise<Response>;
+  /** Single authorized request with non-OK mapping; retries a failed connect until `expiresAt` (ExecutorGateway.raw). */
+  raw: (path: string, init: RequestInit, body?: unknown, options?: { expiresAt?: number }) => Promise<Response>;
 };
 
 /**
@@ -110,7 +110,12 @@ export class CommandRunner {
     const deadline = new Deadline(timeout, signal);
 
     this.port
-      .raw('/run_streaming', { method: 'POST', signal: deadline.signal }, { cmd, cwd, env })
+      .raw(
+        '/run_streaming',
+        { method: 'POST', signal: deadline.signal },
+        { cmd, cwd, env },
+        { expiresAt: deadline.expiresAt },
+      )
       .then((response) => {
         // An empty body would leave consumers waiting for events forever.
         if (!response.body) {
@@ -189,6 +194,7 @@ export class CommandRunner {
         '/run_streaming',
         { method: 'POST', signal: deadline.signal },
         { cmd, cwd, env },
+        { expiresAt: deadline.expiresAt },
       );
 
       assert(response.body);
@@ -216,6 +222,8 @@ export class CommandRunner {
 class Deadline {
   private timer?: ReturnType<typeof setTimeout>;
   private fired = false;
+  /** When the current window ends, as a performance.now() time. */
+  expiresAt = 0;
   private readonly controller = new AbortController();
   private readonly onCallerAbort = () => this.controller.abort();
 
@@ -244,6 +252,7 @@ class Deadline {
 
   arm(): void {
     clearTimeout(this.timer);
+    this.expiresAt = performance.now() + this.timeout * 1_000;
     this.timer = setTimeout(() => {
       this.fired = true;
       this.controller.abort();

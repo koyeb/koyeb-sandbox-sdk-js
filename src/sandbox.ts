@@ -158,7 +158,7 @@ export class Sandbox {
     this.runner = new CommandRunner({
       name: this.name,
       post: (path, init, body, hooks, options) => this.request(path, init, body, hooks, options),
-      raw: (path, init, body) => this.gateway.raw(path, init, body),
+      raw: (path, init, body, options) => this.gateway.raw(path, init, body, options),
     });
   }
 

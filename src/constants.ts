@@ -10,11 +10,14 @@ export const DEFAULT_COMMAND_TIMEOUT = 30;
 export const DEFAULT_HTTP_TIMEOUT = 30;
 // First delay of a readiness wait: doubles up to DEFAULT_POLL_INTERVAL (Python parity).
 export const DEFAULT_WAIT_START_INTERVAL = 0.1;
+// Most sandboxes turn HEALTHY within seconds: wait_ready keeps the start delay
+// for this long, so it sees HEALTHY ~0.1s after it happens, then backs off.
+export const FAST_POLL_WINDOW = 10;
 export const PORT_MIN = 1;
 export const PORT_MAX = 65535;
 
-// Claim readiness polls slower than sandbox readiness (Python parity).
-export const DEFAULT_CLAIM_POLL_INTERVAL = 2;
+// Claim readiness backs off from DEFAULT_WAIT_START_INTERVAL up to this (Python parity).
+export const DEFAULT_CLAIM_POLL_INTERVAL = 0.5;
 
 // Total attempts for an idempotent pool claim before surfacing the last error.
 export const DEFAULT_CLAIM_ATTEMPTS = 3;

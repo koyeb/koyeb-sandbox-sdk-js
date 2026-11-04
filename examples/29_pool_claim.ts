@@ -48,7 +48,7 @@ async function main() {
     try {
       if (!claimed.prewarmed) {
         console.log('\nCold path: waiting for the sandbox service to become ready...');
-        const ready = await wait_claim_ready(claimed, { timeout: 300, poll_interval: 2 });
+        const ready = await wait_claim_ready(claimed, { timeout: 300 });
         if (!ready) {
           throw new Error('Claimed sandbox did not become ready within 300 seconds');
         }

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { koyeb, KoyebApi } from './api.js';
-import { DEFAULT_CLAIM_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT } from './constants.js';
+import { DEFAULT_CLAIM_POLL_INTERVAL, DEFAULT_WAIT_START_INTERVAL, DEFAULT_WAIT_TIMEOUT } from './constants.js';
 import { resolveClient } from './credentials.js';
 import { PoolClaimError, ServiceTerminalStateError } from './errors.js';
 import { assert, omitUndefined } from './prelude.js';
@@ -69,7 +69,7 @@ export type ListClaimsOptions = Partial<{
 export type WaitClaimReadyOptions = Partial<{
   /** Seconds to wait before giving up. Defaults to 300. */
   timeout: number;
-  /** Seconds between Get Service polls. Defaults to 2. */
+  /** Longest delay in seconds between Get Service polls, which back off from 0.1. Defaults to 0.5. */
   poll_interval: number;
   /** API token for authentication, overriding `process.env.KOYEB_API_TOKEN`. */
   api_token: string;
@@ -176,5 +176,6 @@ export async function wait_claim_ready(
     options.timeout ?? DEFAULT_WAIT_TIMEOUT,
     options.poll_interval ?? DEFAULT_CLAIM_POLL_INTERVAL,
     options.signal,
+    DEFAULT_WAIT_START_INTERVAL,
   );
 }

@@ -19,7 +19,11 @@ const probe = (url: string) =>
 
 const PROBE = probe('https://example.com');
 // The allowlist probe must hit an allowed destination; example.com is not in it.
-const PROBE_ALLOWED = probe('https://1.1.1.1');
+// Probe 1.1.1.1 with a raw TCP connect (no DNS, no TLS): HTTPS to a bare IP fails
+// certificate verification even when egress to that IP is allowed.
+const PROBE_ALLOWED =
+  `node -e "const s = require('net').connect(80, '1.1.1.1', () => process.exit(0));` +
+  ` s.on('error', () => process.exit(1)); setTimeout(() => process.exit(1), 5000)"`;
 
 let sandbox: Sandbox | undefined;
 

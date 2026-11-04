@@ -52,8 +52,8 @@ function sandboxWithMockedRequest(): { sandbox: Sandbox; request: Mock } {
 
   beforeEach(() => {
     request.mockReset();
-    vi.spyOn(sandbox as never, 'request').mockImplementation(request as never);
-    vi.spyOn(sandbox as never, 'hasFilesRoutes').mockResolvedValue(false);
+    vi.spyOn(sandbox as unknown as Record<string, () => unknown>, 'request').mockImplementation(request as never);
+    vi.spyOn(sandbox as unknown as Record<string, () => unknown>, 'hasFilesRoutes').mockResolvedValue(false);
   });
 
   return { sandbox, request };

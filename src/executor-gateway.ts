@@ -113,6 +113,16 @@ function parseListLine(line: string): FileListEntry {
   return entry as FileListEntry;
 }
 
+/** Connect failures: the request never reached the executor. ECONNRESET is left
+ *  out — undici raises it too once the executor has read the request. */
+const CONNECT_FAILURE_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN']);
+
+/** fetch's `TypeError: fetch failed` with a connect-phase cause (Python parity: httpx.ConnectError). */
+function isConnectFailure(error: unknown): boolean {
+  const code = (error as { cause?: { code?: unknown } } | undefined)?.cause?.code;
+  return error instanceof TypeError && typeof code === 'string' && CONNECT_FAILURE_CODES.has(code);
+}
+
 /** Reject `promise` with `reason()` the moment `signal` aborts. */
 function raceAbort<T>(promise: Promise<T>, signal: AbortSignal, reason: () => unknown): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -908,9 +918,36 @@ export class ExecutorGateway {
     return { body: withIdleTouch(web, idle), duplex: 'half' };
   }
 
-  /** Single authorized request: non-OK maps to the taxonomy, the body stays unread. */
-  async raw(path: string, init: RequestInit, body?: unknown): Promise<Response> {
-    const response = await this.send(path, init, body);
+  /**
+   * Single authorized request: non-OK maps to the taxonomy, the body stays unread.
+   *
+   * Only a failed connect is sent again, with post()'s backoff: the request
+   * never reached the executor, so the command did not start. Nothing is
+   * retried once a response came back (a 5xx or a cut stream may come after
+   * the command ran), after an abort, or when the backoff would end at or past
+   * `expiresAt` (a performance.now() time) — Python parity: _open_stream.
+   */
+  async raw(path: string, init: RequestInit, body?: unknown, options: { expiresAt?: number } = {}): Promise<Response> {
+    let backoff = DEFAULT_EXECUTOR_RETRY_DELAY_MS;
+    let response: Response;
+
+    for (let attempt = 0; ; attempt++) {
+      try {
+        response = await this.send(path, init, body);
+        break;
+      } catch (error) {
+        const pastDeadline = options.expiresAt !== undefined && performance.now() + backoff >= options.expiresAt;
+        if (!isConnectFailure(error) || init.signal?.aborted || attempt >= DEFAULT_EXECUTOR_RETRIES || pastDeadline) {
+          throw error;
+        }
+      }
+
+      // An abort mid-backoff ends the call: nothing is sent after it.
+      if (!(await wait(backoff, init.signal ?? undefined))) {
+        throw init.signal?.reason;
+      }
+      backoff *= 2;
+    }
 
     if (!response.ok) {
       const text = await response.text();

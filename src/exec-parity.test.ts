@@ -482,3 +482,122 @@ describe('exec_stream exit events', () => {
     expect(seen).toEqual([{ code: 0, error: false }, 'end']);
   });
 });
+
+describe('streaming exec connect retry (Python parity)', () => {
+  /** What undici throws when nothing listens: the request never left. */
+  const connectError = (code = 'ECONNREFUSED') =>
+    new TypeError('fetch failed', { cause: Object.assign(new Error(`connect ${code} 127.0.0.1:443`), { code }) });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('retries a refused connect after 1s, then streams normally', async () => {
+    vi.useFakeTimers();
+    const sandbox = makeSandbox();
+    const fetch = vi
+      .spyOn(sandbox, 'fetch')
+      .mockRejectedValueOnce(connectError())
+      .mockResolvedValueOnce(sseResponse([output('stdout', 'hi'), complete({ code: 0, error: false })]));
+
+    const pending = sandbox.exec('echo hi');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await pending;
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ stdout: 'hi', code: 0 });
+  });
+
+  it('retries exec_stream the same way', async () => {
+    vi.useFakeTimers();
+    const sandbox = makeSandbox();
+    const fetch = vi
+      .spyOn(sandbox, 'fetch')
+      .mockRejectedValueOnce(connectError('ENOTFOUND'))
+      .mockResolvedValueOnce(sseResponse([output('stdout', 'hi'), complete({ code: 0, error: false })]));
+
+    const stream = sandbox.exec_stream('echo hi');
+    const chunks: string[] = [];
+    stream.addEventListener('stdout', (event) => chunks.push((event as MessageEvent).data.data));
+    const ended = new Promise<void>((resolve, reject) => {
+      stream.addEventListener('end', () => resolve());
+      stream.addEventListener('error', (event) => reject((event as MessageEvent).data));
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await ended;
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(chunks).toEqual(['hi']);
+  });
+
+  it('gives up after 3 retries (1, 2, 4 s) with the same error as before', async () => {
+    vi.useFakeTimers();
+    const sandbox = makeSandbox();
+    const fetch = vi.spyOn(sandbox, 'fetch').mockImplementation(async () => Promise.reject(connectError()));
+
+    const error = sandbox.exec('x').catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(6_999);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(await error).toBeInstanceOf(SandboxConnectionError);
+    expect(((await error) as Error).message).toBe('Connection to sandbox lost: TypeError: fetch failed');
+  });
+
+  it('does not retry when the backoff would end past the command timeout', async () => {
+    const sandbox = makeSandbox();
+    const fetch = vi.spyOn(sandbox, 'fetch').mockImplementation(async () => Promise.reject(connectError()));
+
+    const error = await sandbox.exec('x', { timeout: 0.5 }).catch((error: unknown) => error);
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(SandboxConnectionError);
+  });
+
+  it('does not retry a reset connection: the executor may have read the request', async () => {
+    const sandbox = makeSandbox();
+    const fetch = vi.spyOn(sandbox, 'fetch').mockImplementation(async () => Promise.reject(connectError('ECONNRESET')));
+
+    const error = await sandbox.exec('x').catch((error: unknown) => error);
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(SandboxConnectionError);
+  });
+
+  it('does not retry once a response came back: a 5xx or a cut stream', async () => {
+    const sandbox = makeSandbox();
+    const cut = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(output('stdout', 'one')));
+        controller.error(new Error('wire cut'));
+      },
+    });
+    const fetch = vi
+      .spyOn(sandbox, 'fetch')
+      .mockResolvedValueOnce(new Response('bad gateway', { status: 502 }))
+      .mockResolvedValueOnce(new Response(cut, { status: 200 }));
+
+    expect(await sandbox.exec('x').catch((error: unknown) => error)).toBeInstanceOf(SandboxError);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(await sandbox.exec('x').catch((error: unknown) => error)).toBeInstanceOf(SandboxConnectionError);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops retrying when the caller aborts during the backoff', async () => {
+    vi.useFakeTimers();
+    const sandbox = makeSandbox();
+    const controller = new AbortController();
+    const fetch = vi.spyOn(sandbox, 'fetch').mockImplementation(async () => Promise.reject(connectError()));
+
+    const error = sandbox.exec('x', { signal: controller.signal }).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(500);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(await error).toBeInstanceOf(DOMException);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Same-name creates in the same millisecond no longer collide
+
+`Sandbox.create()` names the app it creates `sandbox-app-<name>-<suffix>`. The suffix
+was the millisecond timestamp, and app names are unique per organization, so two
+creates with the same name in the same millisecond (parallel creates, or two processes
+in one organization) failed with 400 "name already exists". The suffix is now the
+timestamp in base 36 plus 5 random characters: still 13 characters, so every name that
+fit the 64-character app name limit still fits.
+
 ### Readiness waits poll faster near readiness
 
 - `wait_ready()` (and `Sandbox.create()`) checks every 0.1 s for the first 10 s of the

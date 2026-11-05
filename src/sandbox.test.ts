@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Duration } from './duration.js';
 import { SandboxDeploymentError } from './errors.js';
-import { Sandbox } from './sandbox.js';
+import { Sandbox, sandboxAppName } from './sandbox.js';
 import { completeEvent, sseResponse } from './test-support.js';
 
 // --- Fake fetch (system-boundary seam: the Koyeb public API and the sandbox gateway) ---
@@ -157,6 +157,21 @@ describe('Sandbox.create', () => {
       'GET /v1/deployments/dep-1',
       'GET /koyeb-sandbox/health',
     ]);
+  });
+});
+
+describe('sandboxAppName', () => {
+  it('differs for the same name in the same millisecond, and stays a valid app name', () => {
+    vi.useFakeTimers({ now: new Date('2026-11-05T12:00:00Z') });
+    const name = 'n'.repeat(38); // the longest name that fit with the 13-digit millisecond suffix
+
+    const names = new Set(Array.from({ length: 20 }, () => sandboxAppName(name)));
+
+    expect(names.size).toBe(20);
+    for (const appName of names) {
+      expect(appName.length).toBeLessThanOrEqual(64);
+      expect(appName).toMatch(/^[a-z0-9]+([.-][a-z0-9]+)*$/);
+    }
   });
 });
 

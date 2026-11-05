@@ -13,6 +13,10 @@ if (!apiToken) {
 
 const suffix = Math.random().toString(36).slice(2, 10);
 
+// A ready sandbox has a running executor; the image's own command may not have run yet. Wait up to 10 s for the
+// file it writes before reading it.
+const catWhenPresent = (path: string) => `for i in $(seq 50); do [ -f ${path} ] && break; sleep 0.2; done; cat ${path}`;
+
 async function main() {
   // Example 1: custom command with args.
   console.log('=== Example 1: custom command ===');
@@ -30,7 +34,7 @@ async function main() {
       timeout: 300,
     });
 
-    const result = await sandbox.exec("cat /tmp/command-was-here && echo 'File exists'");
+    const result = await sandbox.exec(`${catWhenPresent('/tmp/command-was-here')} && echo 'File exists'`);
     console.log(`  ${result.stdout.trim()}`);
     if (result.code !== 0) {
       throw new Error('Expected /tmp/command-was-here to exist');
@@ -57,7 +61,7 @@ async function main() {
       timeout: 300,
     });
 
-    const result = await sandbox.exec('cat /tmp/started-by-node');
+    const result = await sandbox.exec(catWhenPresent('/tmp/started-by-node'));
     const content = result.stdout.trim();
     console.log(`  Marker content: ${content}`);
     if (content !== 'yes') {

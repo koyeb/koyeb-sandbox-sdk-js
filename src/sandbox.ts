@@ -43,9 +43,20 @@ import { type Duration, parseDuration } from './duration.js';
 import { assert, isDefined, omitUndefined } from './prelude.js';
 import { classifyDeploymentStatus } from './readiness.js';
 import { waitFor, waitForPhased } from './time.js';
+import { nanoId } from './id.js';
 
 // Value types live with the definition module; re-exported for the public surface.
 export type { ConfigFile, EnvValue, SecretRef } from './definition.js';
+
+/**
+ * The app holding a sandbox: unique even for two creates of the same name in the same millisecond (app names are
+ * unique per organization), and no longer than the millisecond timestamp it replaced, so names that fit still fit.
+ */
+export function sandboxAppName(name: string | undefined) {
+  return `sandbox-app-${name}-${Date.now().toString(36)}${randomAppSuffix(5)}`;
+}
+
+const randomAppSuffix = nanoId('0123456789abcdefghijklmnopqrstuvwxyz');
 
 export type CreateSandboxOptions = Partial<{
   image: string;
@@ -290,7 +301,7 @@ export class Sandbox {
       app = { id: opts.app_id };
     } else {
       app = await api.createApp({
-        name: `sandbox-app-${opts.name}-${Date.now()}`,
+        name: sandboxAppName(opts.name),
         life_cycle: { delete_when_empty: true },
       });
     }

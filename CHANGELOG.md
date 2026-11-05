@@ -37,8 +37,9 @@ flat memory) — a pull streams `GET /files/archive` and extracts only the chang
 Files larger than one batch ride the multipart `upload_file` / resumable `download_file`
 (ST-136). `delete: true` prunes destination extras topmost-first via the legacy routes;
 `exclude` follows the executor's `tar --exclude` semantics; `dry_run` computes without
-touching either side; a no-op sync sends nothing beyond the listing. Requires executor
-v0.0.24+.
+touching either side; a no-op sync sends nothing beyond the listing. A pull never writes
+outside the local directory: a path that leaves it, or that goes through a symlink, fails
+the sync. Requires executor v0.0.24+.
 
 ```ts
 const result = await sandbox.filesystem.sync('./site', 'site', {

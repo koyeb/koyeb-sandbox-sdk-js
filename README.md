@@ -343,7 +343,9 @@ machine and the sandbox, one way — `rsync -r` without deltas:
   directory counts as one deletion); `exclude: ['*.log', '.git']` follows the
   executor's `tar --exclude` semantics — a matching path or any `/`-separated
   suffix of it is skipped, a matching directory whole. No default excludes
-- Symlinks travel as links, modes are kept, owners are not
+- Symlinks travel as links, modes are kept, owners are not. A pull never writes
+  outside the local directory: a path that leaves it, or that goes through a
+  symlink, fails the sync
 - `remotePath` defaults to the local path's relative form (its basename when
   absolute), rsync-style; relative paths resolve under the sandbox workdir
 - A no-op sync sends nothing beyond the listing; `dry_run: true` computes the

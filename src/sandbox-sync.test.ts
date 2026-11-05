@@ -10,6 +10,7 @@ import { chmod, lstat, mkdir, mkdtemp, open, readFile, rm, stat, symlink, utimes
 import { createReadStream } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 
 import { SandboxFilesystem, type SandboxPort } from './sandbox-filesystem.js';
 import {
@@ -24,6 +25,7 @@ import {
   walkLocal,
   type SyncEntry,
 } from './sync.js';
+import { BLOCK_SIZE, ustarHeaders, ustarTrailer } from './ustar.js';
 
 /**
  * Pins filesystem.sync() against a miniature executor.
@@ -303,6 +305,62 @@ class FakeExecutorTree {
     await rm(target, { recursive: true, force: true });
     return {};
   }
+}
+
+/** An executor whose listing and archive are given verbatim: a pull must
+ *  stay inside its destination whatever the sandbox sends. Members are
+ *  [name, linkname] for a symlink, [name, null, content] for a file. */
+class ScriptedExecutorTree extends FakeExecutorTree {
+  constructor(
+    root: string,
+    readonly listing: SyncEntry[],
+    readonly members: Array<[string, string | null, string?]>,
+  ) {
+    super(root);
+  }
+
+  override async *filesList(path: string): AsyncGenerator<SyncEntry, void, unknown> {
+    this.calls.push(['files_list', path, true]);
+    for (const entry of this.listing) yield entry;
+  }
+
+  override async *filesArchiveGet(
+    path: string,
+    options?: { exclude?: string[] },
+  ): AsyncGenerator<Uint8Array, void, unknown> {
+    this.calls.push(['files_archive_get', path, [...(options?.exclude ?? [])]]);
+    const blocks: Uint8Array[] = [];
+    for (const [name, linkname, content = ''] of this.members) {
+      const bytes = new TextEncoder().encode(content);
+      if (linkname !== null) {
+        blocks.push(...ustarHeaders({ name, type: 'symlink', mode: 0o777, mtime: 0, size: 0, linkname }));
+        continue;
+      }
+      blocks.push(...ustarHeaders({ name, type: 'file', mode: 0o644, mtime: 0, size: bytes.length }));
+      blocks.push(bytes, new Uint8Array((BLOCK_SIZE - (bytes.length % BLOCK_SIZE)) % BLOCK_SIZE));
+    }
+    blocks.push(ustarTrailer());
+    yield gzipSync(Buffer.concat(blocks));
+  }
+
+  override async filesStat(path: string): Promise<Record<string, unknown>> {
+    this.calls.push(['files_stat', path, null]);
+    return { type: 'file', size: 2, mode: '0644', mtime: '2026-10-27T10:00:00Z' };
+  }
+
+  override async filesReadRange(
+    path: string,
+  ): Promise<{ status: number; etag: string; stream: AsyncGenerator<Uint8Array, void, unknown> }> {
+    this.calls.push(['files_read_range', path]);
+    const stream = (async function* () {
+      yield new TextEncoder().encode('hi');
+    })();
+    return { status: 200, etag: '"2-0"', stream };
+  }
+}
+
+function listed(path: string, type: string, size = 0): SyncEntry {
+  return { path, type, size, mode: '0644', mtime: '2026-10-27T10:00:00Z' };
 }
 
   /** The tree every push/pull test starts from: file, subdir file, symlink, empty dir. */
@@ -1028,6 +1086,108 @@ describe('sync pull', () => {
       expect(fake.callsOf('files_archive_get')).toEqual([]);
       expect(await readdir(dest)).toEqual([]);
       expect(result).toEqual({ downloaded: 5, deleted: 0, skipped: 0, bytes: 7 });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  async function outsideDir(base: string): Promise<string> {
+    const outside = join(base, 'outside');
+    await write(join(outside, 'child.txt'), 'keep');
+    return outside;
+  }
+
+  it('refuses a listing path outside the destination', async () => {
+    const { base, remoteRoot, cleanup } = await makeCase();
+    try {
+      const outside = await outsideDir(base);
+      const fake = new ScriptedExecutorTree(
+        remoteRoot,
+        [listed('../outside/evil.txt', 'file', 2)],
+        [['../outside/evil.txt', null, 'hi']],
+      );
+      const fs = new SandboxFilesystem(fake as unknown as SandboxPort);
+
+      await expect(fs.sync(join(base, 'dest'), 'dst', { direction: 'pull' })).rejects.toThrow(SandboxFilesystemError);
+      expect(await readdir(outside)).toEqual(['child.txt']);
+      expect(fake.callsOf('files_archive_get')).toEqual([]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('refuses a member through a symlink', async () => {
+    const { base, remoteRoot, cleanup } = await makeCase();
+    try {
+      const outside = await outsideDir(base);
+      const fake = new ScriptedExecutorTree(
+        remoteRoot,
+        [listed('a', 'symlink'), listed('a/evil.txt', 'file', 2)],
+        [['a', outside], ['a/evil.txt', null, 'hi']],
+      );
+      const fs = new SandboxFilesystem(fake as unknown as SandboxPort);
+
+      await expect(fs.sync(join(base, 'dest'), 'dst', { direction: 'pull' })).rejects.toThrow(SandboxFilesystemError);
+      expect(await readdir(outside)).toEqual(['child.txt']);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('refuses an oversized download through a symlink', async () => {
+    const { base, remoteRoot, cleanup } = await makeCase();
+    try {
+      const outside = await outsideDir(base);
+      const fake = new ScriptedExecutorTree(
+        remoteRoot,
+        [listed('a', 'symlink'), listed('a/big.bin', 'file', SYNC_BATCH_BYTES + 1)],
+        [['a', outside]],
+      );
+      const fs = new SandboxFilesystem(fake as unknown as SandboxPort);
+
+      await expect(fs.sync(join(base, 'dest'), 'dst', { direction: 'pull' })).rejects.toThrow(SandboxFilesystemError);
+      expect(await readdir(outside)).toEqual(['child.txt']);
+      expect(fake.callsOf('files_read_range')).toEqual([]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('does not follow a symlink at an oversized download\'s .part path', async () => {
+    // The archive lands before the oversized downloads: a symlink at
+    // <name>.part must not carry the download's bytes elsewhere.
+    const { base, remoteRoot, fake, fs, cleanup } = await makeCase();
+    try {
+      const victim = join(await outsideDir(base), 'child.txt');
+      const big = join(remoteRoot, 'dst', 'big.bin');
+      await write(big, '');
+      const handle = await open(big, 'r+');
+      await handle.truncate(SYNC_BATCH_BYTES + 1);
+      await handle.close();
+      await symlink(victim, join(remoteRoot, 'dst', 'big.bin.part'));
+
+      await expect(fs.sync(join(base, 'dest'), 'dst', { direction: 'pull' })).rejects.toThrow(SandboxFilesystemError);
+      expect(await readFile(victim, 'utf-8')).toBe('keep');
+      expect(fake.callsOf('files_archive_get')).toHaveLength(1);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('a type flip to a symlink deletes nothing through it', async () => {
+    const { base, remoteRoot, fs, cleanup } = await makeCase();
+    try {
+      const outside = await outsideDir(base);
+      await mkdir(join(remoteRoot, 'dst'), { recursive: true });
+      await symlink(outside, join(remoteRoot, 'dst', 'flip'));
+      const dest = join(base, 'dest');
+      await write(join(dest, 'flip', 'child.txt'));
+
+      const result = await fs.sync(dest, 'dst', { direction: 'pull', delete: true });
+
+      expect((await lstat(join(dest, 'flip'))).isSymbolicLink()).toBe(true);
+      expect(await readdir(outside)).toEqual(['child.txt']);
+      expect(result.deleted).toBe(1);
     } finally {
       await cleanup();
     }

@@ -19,6 +19,7 @@
  * Python parity: koyeb/sandbox/sync.py.
  */
 
+import type { FileHandle } from 'node:fs/promises';
 import * as nodePath from 'node:path';
 
 import {
@@ -559,9 +560,45 @@ export function remoteJoin(remote: string, rel: string): string {
   return `${remote}/${rel}`;
 }
 
-/** A local path for a relative entry path, on any platform. */
+/** A local path for a relative entry path, on any platform.
+ *
+ *  Paths come from the remote side on pull, so they get the archive member
+ *  check; Windows separators and drives inside a name are caught by the
+ *  final containment check.
+ */
 export function joinLocal(root: string, rel: string): string {
-  return nodePath.join(root, ...rel.split('/'));
+  const full = nodePath.join(root, ...cleanPath(rel).split('/'));
+  const fromRoot = nodePath.relative(nodePath.resolve(root), nodePath.resolve(full));
+  if (fromRoot === '..' || fromRoot.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(fromRoot)) {
+    throw new Error(`refusing path outside destination: ${JSON.stringify(rel)}`);
+  }
+  return full;
+}
+
+/** joinLocal for a write: a symlink among the parents under root is refused,
+ *  since writing through it would land outside root. */
+export async function joinLocalForWrite(root: string, rel: string): Promise<string> {
+  const fsp = await import('node:fs/promises');
+  const full = joinLocal(root, rel);
+  const parts = cleanPath(rel).split('/');
+  let path = root;
+  for (const part of parts.slice(0, -1)) {
+    path = nodePath.join(path, part);
+    const st = await fsp.lstat(path).catch(() => null);
+    if (st === null) break;
+    if (st.isSymbolicLink()) {
+      throw new Error(`refusing path through a symlink: ${JSON.stringify(rel)}`);
+    }
+  }
+  return full;
+}
+
+/** Open path for writing, refusing to follow a symlink at path. */
+export async function openNoFollow(path: string): Promise<FileHandle> {
+  const fsp = await import('node:fs/promises');
+  const { constants } = await import('node:fs');
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0);
+  return fsp.open(path, flags, 0o666);
 }
 
 /** Topmost paths only: deleting a directory takes its descendants.
@@ -660,12 +697,12 @@ export async function buildArchive(root: string, entries: SyncEntry[], dest: str
   await pipeline(Readable.from(blocks()), createGzip(), createWriteStream(dest));
 }
 
-/** A member path safe to write under the destination, or a refusal.
+/** A relative path safe to write under the destination, or a refusal.
  *
  *  The same refusal the executor applies to archives it extracts:
  *  absolute paths and .. escapes never touch the filesystem.
  */
-function cleanMemberName(name: string): string {
+export function cleanPath(name: string): string {
   const absolute = name.startsWith('/');
   const out: string[] = [];
   for (const part of name.split('/')) {
@@ -709,14 +746,13 @@ async function extractFile(
   path: string,
 ): Promise<void> {
   const fsp = await import('node:fs/promises');
-  const { createWriteStream } = await import('node:fs');
   const { pipeline } = await import('node:stream/promises');
   const { Readable } = await import('node:stream');
 
   await clearMember(path);
   await fsp.mkdir(nodePath.dirname(path), { recursive: true });
-  const out = createWriteStream(path);
-  await pipeline(Readable.from(reader.content()), out);
+  const handle = await openNoFollow(path);
+  await pipeline(Readable.from(reader.content()), handle.createWriteStream());
   const mtime = Math.trunc(member.mtime);
   await fsp.utimes(path, mtime, mtime);
   await fsp.chmod(path, member.mode & 0o7777);
@@ -776,21 +812,20 @@ export async function extractArchive(
   const reader = new UstarReader(gunzip);
 
   const extracted: string[] = [];
-  const dirs: Array<{ path: string; mode: number; mtime: number }> = [];
+  const dirs: Array<{ name: string; mode: number; mtime: number }> = [];
   try {
     for (;;) {
       const member = await reader.next();
       if (member === null) break;
-      const name = cleanMemberName(member.name);
+      const name = cleanPath(member.name);
       if (keep !== undefined && !keep.has(name)) {
         await reader.drain();
         continue;
       }
-      const path = joinLocal(dest, name);
-      const kind = await extractMember(reader, member, path);
+      const kind = await extractMember(reader, member, await joinLocalForWrite(dest, name));
       if (kind === 'skip') continue;
       if (kind === 'dir') {
-        dirs.push({ path, mode: member.mode, mtime: member.mtime });
+        dirs.push({ name, mode: member.mode, mtime: member.mtime });
       }
       extracted.push(name);
     }
@@ -801,10 +836,15 @@ export async function extractArchive(
 
   // Directory modes and mtimes last, deepest first, like the executor.
   const fsp = await import('node:fs/promises');
-  for (const dir of dirs.sort((a, b) => (a.path > b.path ? -1 : a.path < b.path ? 1 : 0))) {
+  for (const dir of dirs.sort((a, b) => (a.name > b.name ? -1 : a.name < b.name ? 1 : 0))) {
+    // A later member may have replaced the directory or a parent with a
+    // symlink: utimes and chmod would follow it.
+    const path = await joinLocalForWrite(dest, dir.name);
+    const st = await fsp.lstat(path).catch(() => null);
+    if (st === null || !st.isDirectory()) continue;
     const mtime = Math.trunc(dir.mtime);
-    await fsp.utimes(dir.path, mtime, mtime);
-    await fsp.chmod(dir.path, dir.mode & 0o7777);
+    await fsp.utimes(path, mtime, mtime);
+    await fsp.chmod(path, dir.mode & 0o7777);
   }
   return extracted;
 }

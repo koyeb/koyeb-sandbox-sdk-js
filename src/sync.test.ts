@@ -22,6 +22,7 @@ import {
   formatMtime,
   hashCandidates,
   joinLocal,
+  joinLocalForWrite,
   mtimeSeconds,
   pathExcluded,
   pathMatch,
@@ -580,6 +581,17 @@ describe('remoteJoin and joinLocal', () => {
   it('joins local paths on the platform separator', () => {
     expect(joinLocal('root', 'a/b.txt')).toBe(join('root', 'a', 'b.txt'));
   });
+
+  it('refuses local paths outside the root', async () => {
+    for (const rel of ['../x', '/etc/x', 'a/../../x']) {
+      expect(() => joinLocal('root', rel)).toThrow(/outside/i);
+    }
+    await withTmpDir(async (root) => {
+      await symlink(tmpdir(), join(root, 'link'));
+      await expect(joinLocalForWrite(root, 'link/x')).rejects.toThrow(/symlink/i);
+      expect(await joinLocalForWrite(root, 'a/b.txt')).toBe(join(root, 'a', 'b.txt'));
+    });
+  });
 });
 
 describe('buildArchive and extractArchive', () => {
@@ -758,6 +770,112 @@ describe('buildArchive and extractArchive', () => {
     await pipeline(Readable.from([tar]), createGzip(), createWriteStream(archive));
     return archive;
   }
+
+  type RawMember = { name: string; type: 'file' | 'dir' | 'symlink'; content?: string; linkname?: string; mode?: number };
+
+  /** A tar of members exactly as given, gzipped: what a sandbox may send. */
+  async function rawMembersArchive(root: string, members: RawMember[]): Promise<string> {
+    const archive = join(root, 'members.tgz');
+    const blocks: Uint8Array[] = [];
+    for (const m of members) {
+      const content = encoder.encode(m.content ?? '');
+      const member: UstarMember = {
+        name: m.name,
+        type: m.type,
+        mode: m.mode ?? 0o644,
+        mtime: 0,
+        size: m.type === 'file' ? content.length : 0,
+        ...(m.type === 'symlink' ? { linkname: m.linkname ?? '' } : {}),
+      };
+      blocks.push(...ustarHeaders(member));
+      if (m.type === 'file') {
+        blocks.push(content, new Uint8Array((BLOCK_SIZE - (content.length % BLOCK_SIZE)) % BLOCK_SIZE));
+      }
+    }
+    blocks.push(ustarTrailer());
+    await pipeline(Readable.from(blocks), createGzip(), createWriteStream(archive));
+    return archive;
+  }
+
+  async function outsideDir(root: string): Promise<string> {
+    const outside = join(root, 'outside');
+    await mkdir(outside);
+    await chmod(outside, 0o755);
+    return outside;
+  }
+
+  it('refuses a member through a symlink member', async () => {
+    await withTmpDir(async (root) => {
+      const dst = join(root, 'dst');
+      await mkdir(dst);
+      const outside = await outsideDir(root);
+      const archive = await rawMembersArchive(root, [
+        { name: 'a', type: 'symlink', linkname: outside },
+        { name: 'a/evil.txt', type: 'file', content: 'hi' },
+      ]);
+      await expect(extractArchive(archive, dst)).rejects.toThrow(/symlink/i);
+      expect(await readdir(outside)).toEqual([]);
+    });
+  });
+
+  it('refuses a member through an existing symlink', async () => {
+    await withTmpDir(async (root) => {
+      const dst = join(root, 'dst');
+      await mkdir(dst);
+      const outside = await outsideDir(root);
+      await symlink(outside, join(dst, 'a'));
+      const archive = await rawMembersArchive(root, [
+        { name: 'a/sub', type: 'dir', mode: 0o755 },
+        { name: 'a/sub/evil.txt', type: 'file', content: 'hi' },
+      ]);
+      await expect(extractArchive(archive, dst)).rejects.toThrow(/symlink/i);
+      expect(await readdir(outside)).toEqual([]);
+    });
+  });
+
+  it('replaces a symlink with a file member without following it', async () => {
+    await withTmpDir(async (root) => {
+      const dst = join(root, 'dst');
+      await mkdir(dst);
+      const victim = join(await outsideDir(root), 'victim.txt');
+      await writeFile(victim, 'keep');
+      await symlink(victim, join(dst, 'a.txt'));
+      const archive = await rawMembersArchive(root, [{ name: 'a.txt', type: 'file', content: 'new' }]);
+      await extractArchive(archive, dst);
+      expect(await readFile(victim, 'utf-8')).toBe('keep');
+      expect((await lstat(join(dst, 'a.txt'))).isSymbolicLink()).toBe(false);
+    });
+  });
+
+  it('does not apply a directory mode through a later symlink', async () => {
+    await withTmpDir(async (root) => {
+      const dst = join(root, 'dst');
+      await mkdir(dst);
+      const outside = await outsideDir(root);
+      const archive = await rawMembersArchive(root, [
+        { name: 'd', type: 'dir', mode: 0o700 },
+        { name: 'd', type: 'symlink', linkname: outside },
+      ]);
+      await extractArchive(archive, dst);
+      expect((await stat(outside)).mode & 0o777).toBe(0o755);
+    });
+  });
+
+  it('keeps symlink members as sent', async () => {
+    // Links are data, like rsync -l: kept, never written through.
+    await withTmpDir(async (root) => {
+      const dst = join(root, 'dst');
+      await mkdir(dst);
+      const archive = await rawMembersArchive(root, [
+        { name: 'abs', type: 'symlink', linkname: '/usr/bin/python3' },
+        { name: 'rel', type: 'symlink', linkname: '../up' },
+      ]);
+      await extractArchive(archive, dst);
+      const { readlink } = await import('node:fs/promises');
+      expect(await readlink(join(dst, 'abs'))).toBe('/usr/bin/python3');
+      expect(await readlink(join(dst, 'rel'))).toBe('../up');
+    });
+  });
 
   it('refuses traversal members', async () => {
     await withTmpDir(async (root) => {

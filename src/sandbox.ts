@@ -40,7 +40,7 @@ import {
 } from './executor-gateway.js';
 import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
 import { type Duration, parseDuration } from './duration.js';
-import { assert, isDefined, isUndefined, omitUndefined } from './prelude.js';
+import { assert, isDefined, omitUndefined } from './prelude.js';
 import { classifyDeploymentStatus } from './readiness.js';
 import { waitFor, waitForPhased } from './time.js';
 
@@ -366,7 +366,8 @@ export class Sandbox {
     }
 
     const service = await this.api.getService(this.service_id);
-    const deploymentId = service.active_deployment_id ?? service.latest_deployment_id;
+    // `||`, not `??`: the API sends an unset active deployment as "".
+    const deploymentId = service.active_deployment_id || service.latest_deployment_id;
 
     if (deploymentId) {
       this._deployment_id = deploymentId;
@@ -408,8 +409,10 @@ export class Sandbox {
     const service = await api.getService(serviceId);
     // Prefer the live deployment over the latest one, matching the Python
     // SDK: a rolled-back sandbox must resolve to the deployment that is
-    // actually serving.
-    const deploymentId = service.active_deployment_id ?? service.latest_deployment_id;
+    // actually serving. `||`, not `??`: the API sends an unset active
+    // deployment as "" until the service has marked a deployment active,
+    // a moment after it turns healthy.
+    const deploymentId = service.active_deployment_id || service.latest_deployment_id;
     const noSecret = () =>
       new NoSandboxSecretError(
         `Sandbox '${serviceId}' has no SANDBOX_SECRET in its deployment definition — it may not be a Koyeb sandbox service, so the executor connection cannot be established.`,
@@ -520,7 +523,7 @@ export class Sandbox {
     try {
       const service = await this.api.getService(this.service_id);
 
-      if (isUndefined(service.active_deployment_id)) {
+      if (!service.active_deployment_id) {
         return;
       }
 

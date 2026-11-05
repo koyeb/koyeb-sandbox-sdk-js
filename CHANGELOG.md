@@ -13,6 +13,15 @@
 - Both send more status requests per wait: a create ready in ~4 s makes ~28 API requests
   instead of ~10, a claim that starts its sandbox ~14 instead of ~7.
 
+### `get_from_id` right after create no longer raises `NoSandboxSecretError`
+
+Until a new service marks its deployment active, a moment after the deployment turns
+healthy, the API returns `active_deployment_id` as `""`. `get_from_id` kept that empty
+id instead of falling back to `latest_deployment_id`, and raised `NoSandboxSecretError`
+without reading any deployment: about 1 call in 20 made just after `Sandbox.create()`.
+An empty id now counts as unset there, in the readiness wait of a handle without a
+pinned deployment, and in `get_tcp_proxy_info()`. Python parity (`active or latest`).
+
 ### Streaming `exec` retries a refused connect, as `stream: false` does
 
 `exec()` (streaming by default) and `exec_stream()` now send the command again when the

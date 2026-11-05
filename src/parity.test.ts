@@ -735,6 +735,28 @@ describe('readiness parity', () => {
     expect(deploymentCall!.url).toContain('dep-active');
   });
 
+  it('get_from_id falls back to the latest deployment while the active one is still unset', async () => {
+    // The API sends an unset active deployment as "", as it does right after create.
+    stubControlPlane({
+      service: {
+        id: SERVICE_ID,
+        app_id: APP_ID,
+        name: 'sbx',
+        status: 'STARTING',
+        active_deployment_id: '',
+        latest_deployment_id: DEPLOYMENT_ID,
+      } as koyeb.Service,
+    });
+
+    await Sandbox.get_from_id(SERVICE_ID, 'token');
+
+    const deploymentCall = vi
+      .mocked(globalThis.fetch)
+      .mock.calls.map(([request]) => request as Request)
+      .find((request) => request.url.includes('/v1/deployments/'));
+    expect(deploymentCall!.url).toContain(DEPLOYMENT_ID);
+  });
+
   it('get_from_id names the real problem when the deployment has no SANDBOX_SECRET', async () => {
     stubControlPlane({
       deployment: {
@@ -1188,6 +1210,16 @@ describe('tcp proxy lookup parity with the Python SDK', () => {
     vi.spyOn(api, 'getService').mockRejectedValue(new SandboxApiError(500, { message: 'blip' }));
 
     await expect(sandbox.get_tcp_proxy_info()).resolves.toBeUndefined();
+  });
+
+  it('reads no deployment while the active one is still unset', async () => {
+    const sandbox = new Sandbox(APP_ID, SERVICE_ID, 'sbx', 'secret', 'token');
+    const api = (sandbox as unknown as { api: KoyebApi }).api;
+    vi.spyOn(api, 'getService').mockResolvedValue({ active_deployment_id: '' } as never);
+    const getDeployment = vi.spyOn(api, 'getDeployment');
+
+    await expect(sandbox.get_tcp_proxy_info()).resolves.toBeUndefined();
+    expect(getDeployment).not.toHaveBeenCalled();
   });
 
   it('still resolves the proxy host and port when present', async () => {

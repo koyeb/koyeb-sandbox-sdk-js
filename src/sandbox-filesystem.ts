@@ -29,10 +29,13 @@ import {
 import {
   SYNC_BATCH_BYTES,
   buildArchive,
+  cleanPath,
   diff,
   extractArchive,
   hashCandidates,
   joinLocal,
+  joinLocalForWrite,
+  openNoFollow,
   pathExcluded,
   planBatches,
   pruneDescendants,
@@ -1056,7 +1059,7 @@ export class SandboxFilesystem {
         const entry = requireStatEntry(await this.sandbox.filesStat(remote_path));
         const reporter = new ProgressReporter(options.progress, entry.size);
 
-        const handle = await fs.open(part_path, 'w');
+        const handle = await openNoFollow(part_path);
         let done: number;
         try {
           done = await this.streamWithResume(remote_path, entry.size, handle, reporter, options.signal);
@@ -1088,7 +1091,8 @@ export class SandboxFilesystem {
    * through upload_file/download_file instead (multipart uploads,
    * resumable downloads), and a pull's archive leaves them out so their
    * bytes travel once. Symlinks travel as links, modes are kept, owners
-   * are not.
+   * are not. A pull never writes outside local: a path that leaves it, or
+   * that goes through a symlink, fails the sync.
    *
    * A no-op sync sends nothing: nothing is transferred or deleted; beyond
    * the listing only `checksum: true` asks more — one sha256 stat per
@@ -1185,6 +1189,9 @@ export class SandboxFilesystem {
     // A missing remote source refuses the pull, rsync-style: silently
     // treating it as an empty tree would delete the whole local side.
     const remoteEntries = await this.listRemote(remote, exclude, signal, false);
+    // The listing comes from the sandbox: refuse a path that would land
+    // outside local before anything is written.
+    for (const entry of remoteEntries) cleanPath(entry.path);
 
     const hashes = await this.syncHashes(local, remote, checksum, true, remoteEntries, localEntries, signal);
     const result = diff(remoteEntries, localEntries, { delete: doDelete, ...hashes });
@@ -1211,7 +1218,9 @@ export class SandboxFilesystem {
         await this.pullArchive(local, remote, archiveExclude, batches, signal);
       }
       for (const entry of oversized) {
-        await this.download_file(remoteJoin(remote, entry.path), joinLocal(local, entry.path), { signal });
+        await this.download_file(remoteJoin(remote, entry.path), await joinLocalForWrite(local, entry.path), {
+          signal,
+        });
       }
       const deleted = await this.syncLocalDeletes(local, result, doDelete);
       return {
@@ -1381,9 +1390,11 @@ export class SandboxFilesystem {
     const byPath = new Map(result.deletes.map((entry) => [entry.path, entry]));
     let count = 0;
     for (const path of pruneDescendants([...byPath.keys()])) {
-      const target = joinLocal(local, path);
-      const st = await fsp.lstat(target).catch(() => null);
-      if (st !== null) {
+      // A type flip's extract may have replaced a parent with a symlink: the
+      // path is gone from the tree, never delete through it.
+      const target = await joinLocalForWrite(local, path).catch(() => null);
+      const st = target === null ? null : await fsp.lstat(target).catch(() => null);
+      if (target !== null && st !== null) {
         if (st.isDirectory()) {
           await fsp.rm(target, { recursive: true, force: true });
         } else {

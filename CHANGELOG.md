@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### `KOYEB_SANDBOX_GATEWAY_URL` overrides the sandbox gateway
+
+Like `KOYEB_SANDBOX_GATEWAY_URL` in the Python SDK (1.6.0): when set, every executor
+call (exec, files, health) goes to that gateway instead of the `public_url` the API
+returns, for example `http://sandbox-gateway.<namespace>.svc` for clients inside a
+self-hosted cluster. The routing key and sandbox secret still come from the deployment
+metadata. `get_domain()` keeps the public URL.
+
 ### Same-name creates in the same millisecond no longer collide
 
 `Sandbox.create()` names the app it creates `sandbox-app-<name>-<suffix>`. The suffix

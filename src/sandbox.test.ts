@@ -434,3 +434,52 @@ describe('Sandbox.get_from_id', () => {
     ]);
   });
 });
+
+describe('KOYEB_SANDBOX_GATEWAY_URL', () => {
+  function handle() {
+    const sandbox = new Sandbox('app-1', 'svc-1', 'sb', 'secret-1', 'token');
+    (sandbox as unknown as { _conn_info: unknown })._conn_info = {
+      public_url: 'https://sandboxes.example.com/koyeb-sandbox',
+      routing_key: 'rk',
+      secret: 'secret-1',
+    };
+    return sandbox;
+  }
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it('uses the URL from the API when unset', async () => {
+    vi.stubEnv('KOYEB_SANDBOX_GATEWAY_URL', '');
+
+    await expect(handle().get_conn_info()).resolves.toEqual({
+      public_url: 'https://sandboxes.example.com/koyeb-sandbox',
+      routing_key: 'rk',
+      secret: 'secret-1',
+    });
+  });
+
+  it('overrides the gateway URL, keeping the routing key and secret', async () => {
+    vi.stubEnv('KOYEB_SANDBOX_GATEWAY_URL', 'http://sandbox-gateway.ns.svc/');
+
+    await expect(handle().get_conn_info()).resolves.toEqual({
+      public_url: 'http://sandbox-gateway.ns.svc/koyeb-sandbox',
+      routing_key: 'rk',
+      secret: 'secret-1',
+    });
+  });
+
+  it('sends executor requests to the override', async () => {
+    vi.stubEnv('KOYEB_SANDBOX_GATEWAY_URL', 'http://sandbox-gateway.ns.svc');
+    const fetch = vi.fn(async () => new Response('{}'));
+    vi.stubGlobal('fetch', fetch);
+
+    await handle().fetch('/health', { method: 'GET' });
+
+    const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('http://sandbox-gateway.ns.svc/koyeb-sandbox/health');
+    expect(new Headers(init.headers).get('X-Routing-Key')).toBe('rk');
+  });
+});

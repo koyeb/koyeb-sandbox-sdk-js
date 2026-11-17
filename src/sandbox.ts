@@ -40,7 +40,7 @@ import {
 } from './executor-gateway.js';
 import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
 import { type Duration, parseDuration } from './duration.js';
-import { assert, isDefined, omitUndefined } from './prelude.js';
+import { assert, getEnv, isDefined, omitUndefined } from './prelude.js';
 import { classifyDeploymentStatus } from './readiness.js';
 import { waitFor, waitForPhased } from './time.js';
 import { nanoId } from './id.js';
@@ -597,6 +597,19 @@ export class Sandbox {
   }
 
   async get_conn_info(): Promise<ConnectionInfo> {
+    const conn_info = await this.resolve_conn_info();
+    // Full override of the gateway the API advertises, like KOYEB_API_HOST
+    // for the API (e.g. an in-cluster Service). Same as the Python SDK.
+    const gateway_url = getEnv('KOYEB_SANDBOX_GATEWAY_URL');
+
+    if (gateway_url) {
+      return { ...conn_info, public_url: `${gateway_url.replace(/\/+$/, '')}/koyeb-sandbox` };
+    }
+
+    return conn_info;
+  }
+
+  private async resolve_conn_info(): Promise<ConnectionInfo> {
     if (this._conn_info) {
       return this._conn_info;
     }

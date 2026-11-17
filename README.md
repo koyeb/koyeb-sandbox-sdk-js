@@ -27,6 +27,12 @@ Set your [API access token](https://app.koyeb.com/settings/api) before using the
 export KOYEB_API_TOKEN="<your-api-token>"
 ```
 
+Optionally, send all sandbox commands and file operations to a specific sandbox gateway instead of the one the API returns (for example an in-cluster Service on a self-hosted cluster):
+
+```sh
+export KOYEB_SANDBOX_GATEWAY_URL="http://sandbox-gateway.<namespace>.svc"
+```
+
 ## Quick Start
 
 ```js

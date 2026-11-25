@@ -130,6 +130,8 @@ export type DefinitionOptions = Partial<{
   ports: Array<{ port: number; protocol: string }>;
   /** Explicit member routes, sent verbatim (pool members of non-SANDBOX type). */
   routes: Array<{ port: number; path: string }>;
+  /** Health checks, sent verbatim (non-SANDBOX types only). */
+  health_checks: koyeb.DeploymentHealthCheck[];
 }>;
 
 /**
@@ -141,7 +143,7 @@ export type DefinitionOptions = Partial<{
  */
 export function buildDefinition(
   opts: DefinitionOptions,
-  { pool = false }: { pool?: boolean } = {},
+  { pool = false, secret = !pool }: { pool?: boolean; secret?: boolean } = {},
 ): {
   definition: koyeb.DeploymentDefinition;
   sandbox_secret?: string;
@@ -209,7 +211,8 @@ export function buildDefinition(
     ...(routes && { routes }),
   };
 
-  const sandbox_secret = pool ? undefined : (opts.sandbox_secret ?? randomTokenUrlSafe(32));
+  // Sidecars are not sandboxes: they get no executor secret (`secret: false`).
+  const sandbox_secret = secret ? (opts.sandbox_secret ?? randomTokenUrlSafe(32)) : undefined;
 
   // Pools never inject an SDK-generated secret: user env passes through
   // verbatim and the platform mints one server-side when the definition has none.
@@ -225,6 +228,10 @@ export function buildDefinition(
 
   if (network_policy) {
     definition.network_policy = network_policy;
+  }
+
+  if (opts.health_checks) {
+    definition.health_checks = opts.health_checks;
   }
 
   // Tri-state mesh mapping: the field is always sent, unset meaning AUTO

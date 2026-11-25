@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### `Sidecar`: a helper service that runs next to the sandbox
+
+Like the Python SDK's `Sidecar`: a trusted helper service with its own image, env,
+secrets and egress policy that runs next to a sandbox, which reaches it by name over a
+private mesh (`http://<name>:<port>`). Secrets given to a sidecar never enter the sandbox.
+`new Sidecar({ name, image, ports })` is validated at construction and `validateSidecars()` checks
+a set: unique names, none equal to the sandbox's. A sidecar is built as a WEB service with no
+routes (not public), tcp ports, a TCP health check on its first port (`startup_grace_period`,
+5-900 s), the mesh enabled with app scope, its own optional egress policy (`block_network`,
+`outbound_allowlist`) and no scale-to-zero. VPN-style sidecars can run `privileged`. This
+release only describes sidecars and builds their service: `Sandbox.create` does not use them
+yet.
+
 ### `mesh_scope` on `Sandbox.create`
 
 Like `mesh_scope` in the Python SDK: `Sandbox.create({ mesh_scope })` takes

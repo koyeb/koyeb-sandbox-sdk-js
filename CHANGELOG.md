@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### `mesh_scope` on `Sandbox.create`
+
+Like `mesh_scope` in the Python SDK: `Sandbox.create({ mesh_scope })` takes
+`MESH_SCOPE_APP`, `MESH_SCOPE_WORKSPACE` or `MESH_SCOPE_ORGANIZATION` and sends it as
+`network_policy.mesh.scope`, next to any egress policy. A scope turns the mesh on.
+`MESH_SCOPE_CUSTOM` (which needs a mesh name), unknown values, `enable_mesh: false`, free
+instances and full snapshots are rejected before any API call. Without `mesh_scope`, create
+sends the same definition as before.
+
+`update_network_policy()` now keeps the sandbox's mesh scope: it used to replace the whole
+network policy, which silently moved the sandbox back to the default mesh.
+
 ### `KOYEB_SANDBOX_GATEWAY_URL` overrides the sandbox gateway
 
 Like `KOYEB_SANDBOX_GATEWAY_URL` in the Python SDK (1.6.0): when set, every executor

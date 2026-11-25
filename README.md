@@ -83,6 +83,7 @@ Creates a new sandbox.
 | `poll_interval`                    | Longest delay in seconds between readiness polls after the first 10 s (defaults to `0.5`).                                          |
 | `cleanup_on_failure`               | Best-effort delete of the sandbox when readiness fails (default `true`). Pass `false` to keep a failed sandbox for inspection.       |
 | `mesh_scope`                       | Which services share the mesh: `MESH_SCOPE_APP`, `MESH_SCOPE_WORKSPACE` or `MESH_SCOPE_ORGANIZATION`. Turns the mesh on.            |
+| `sidecars`                         | Trusted `Sidecar` objects created and waited for first, reached at `http://<name>:<port>`; not with `app_id`/`snapshot`/egress.     |
 
 ### `Sandbox.get_from_id(serviceId, apiToken?, host?)`
 

@@ -19,7 +19,7 @@ import { buildDefinition, type DefinitionOptions } from './definition.js';
  * secrets). Defaults to `type: SANDBOX`; WEB and WORKER are accepted.
  */
 /** No `enable_mesh` (mesh stays AUTO) and no `sandbox_secret` (the platform mints pool secrets). */
-export type CreatePoolOptions = Omit<DefinitionOptions, 'enable_mesh' | 'sandbox_secret'> &
+export type CreatePoolOptions = Omit<DefinitionOptions, 'enable_mesh' | 'mesh_scope' | 'sandbox_secret'> &
   Partial<{
     /** Target number of pre-warmed members to maintain. Defaults to 1. */
     size: number;

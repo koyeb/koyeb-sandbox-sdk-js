@@ -22,7 +22,7 @@ import {
 import { SandboxFilesystem } from './sandbox-filesystem.js';
 import { DeclarativeSnapshot, type TemplateOptions } from './declarative-snapshot.js';
 import type { Snapshot, SnapshotOptions, SnapshotType } from './snapshot.js';
-import { buildNetworkPolicy } from './cidr.js';
+import { buildNetworkPolicy, keepMesh, normalizeMeshScope, type MeshScope } from './cidr.js';
 import { resolveClient } from './credentials.js';
 import { CommandRunner } from './command-runner.js';
 import {
@@ -95,6 +95,13 @@ export type CreateSandboxOptions = Partial<{
   args: string[];
   /** Tri-state mesh toggle: unset = platform default, true = ENABLED, false = DISABLED (Python-SDK parity). */
   enable_mesh: boolean;
+  /**
+   * Which services share the sandbox's mesh: MESH_SCOPE_APP, MESH_SCOPE_WORKSPACE or
+   * MESH_SCOPE_ORGANIZATION. Unset keeps the organization default. Setting a scope turns
+   * the mesh on (`enable_mesh: false` is rejected). Not available on free instances or
+   * with a full snapshot (Python-SDK parity).
+   */
+  mesh_scope: MeshScope | 'MESH_SCOPE_UNSPECIFIED';
   /** Target API host, overriding KOYEB_API_HOST (Python-SDK parity). */
   host: string;
   /** Use an explicit sandbox secret instead of generating one (Python-SDK parity). */
@@ -216,6 +223,7 @@ export class Sandbox {
       command: opts.command,
       args: opts.args,
       enable_mesh: opts.enable_mesh,
+      mesh_scope: opts.mesh_scope,
       sandbox_secret: opts.sandbox_secret,
     });
 
@@ -224,6 +232,11 @@ export class Sandbox {
         ? // Deferred: the snapshot module composes Sandbox, so resolve at call time.
           await (await import('./snapshot.js')).resolveSnapshot(opts.snapshot, token, opts.host)
         : undefined;
+
+    if (resolvedSnapshot?.type === 'FULL' && normalizeMeshScope(opts.mesh_scope) !== undefined) {
+      // A FULL snapshot carries its own definition; the scope would be silently dropped.
+      throw new Error("mesh_scope can't be combined with a full snapshot");
+    }
     const service = await this.createService(token, opts, definition, resolvedSnapshot);
     const sandbox = new Sandbox(
       service.app_id!,
@@ -721,7 +734,10 @@ export class Sandbox {
       const deployment = await this.api.getDeployment(service.latest_deployment_id!);
 
       const updated = await this.api.updateService(this.service_id, {
-        definition: { ...deployment.definition, network_policy },
+        definition: {
+          ...deployment.definition,
+          network_policy: keepMesh(network_policy, deployment.definition?.network_policy),
+        },
       });
 
       // Pin the replacement so wait_ready() polls it, not the still-active old

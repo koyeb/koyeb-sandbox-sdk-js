@@ -2,7 +2,7 @@ import type { koyeb } from './api.js';
 import { DEFAULT_IDLE_TIMEOUT } from './constants.js';
 import { randomTokenUrlSafe } from './id.js';
 import { getEnv } from './prelude.js';
-import { buildNetworkPolicy } from './cidr.js';
+import { buildNetworkPolicy, normalizeMeshScope, type MeshScope } from './cidr.js';
 
 export const DEFAULT_CONFIG_FILE_PERMISSIONS = '0644';
 
@@ -118,6 +118,12 @@ export type DefinitionOptions = Partial<{
   args: string[];
   /** tri-state mesh toggle: unset = platform default (AUTO), true = ENABLED, false = DISABLED. */
   enable_mesh: boolean;
+  /**
+   * Which services share the mesh: MESH_SCOPE_APP, MESH_SCOPE_WORKSPACE or
+   * MESH_SCOPE_ORGANIZATION. Unset keeps the organization default. A scope turns
+   * the mesh on.
+   */
+  mesh_scope: MeshScope | 'MESH_SCOPE_UNSPECIFIED';
   /** Use an explicit sandbox secret instead of generating one. */
   sandbox_secret: string;
   /** Explicit member ports, sent verbatim (pool members of non-SANDBOX type). */
@@ -140,7 +146,26 @@ export function buildDefinition(
   definition: koyeb.DeploymentDefinition;
   sandbox_secret?: string;
 } {
-  const network_policy = buildNetworkPolicy(opts.block_network, opts.outbound_allowlist);
+  const mesh_scope = pool ? undefined : normalizeMeshScope(opts.mesh_scope);
+  let enable_mesh = opts.enable_mesh;
+
+  if (mesh_scope !== undefined) {
+    if (enable_mesh === false) {
+      throw new Error("mesh_scope can't be set when enable_mesh is false");
+    }
+
+    if (opts.instance_type === 'free') {
+      // The API only allows MESH_AUTO on free instances, and AUTO keeps the
+      // mesh off for them: the scope would do nothing.
+      throw new Error("mesh_scope can't be used on free instances");
+    }
+
+    // A scope only takes effect with the mesh on, and AUTO keeps it off for
+    // sandboxes: asking for a scope turns the mesh on.
+    enable_mesh = true;
+  }
+
+  const network_policy = buildNetworkPolicy(opts.block_network, opts.outbound_allowlist, mesh_scope);
 
   const type = opts.type ?? 'SANDBOX';
 
@@ -207,9 +232,9 @@ export function buildDefinition(
   // and always run AUTO.
   definition.mesh = pool
     ? 'DEPLOYMENT_MESH_AUTO'
-    : opts.enable_mesh === undefined
+    : enable_mesh === undefined
       ? 'DEPLOYMENT_MESH_AUTO'
-      : opts.enable_mesh
+      : enable_mesh
         ? 'DEPLOYMENT_MESH_ENABLED'
         : 'DEPLOYMENT_MESH_DISABLED';
 

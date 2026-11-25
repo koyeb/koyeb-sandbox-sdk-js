@@ -82,6 +82,7 @@ Creates a new sandbox.
 | `outbound_allowlist`               | IPs/CIDRs allowed as outbound destinations; all other traffic is blocked. Bare IPs are normalized to `/32` (IPv4) or `/128` (IPv6). |
 | `poll_interval`                    | Longest delay in seconds between readiness polls after the first 10 s (defaults to `0.5`).                                          |
 | `cleanup_on_failure`               | Best-effort delete of the sandbox when readiness fails (default `true`). Pass `false` to keep a failed sandbox for inspection.       |
+| `mesh_scope`                       | Which services share the mesh: `MESH_SCOPE_APP`, `MESH_SCOPE_WORKSPACE` or `MESH_SCOPE_ORGANIZATION`. Turns the mesh on.            |
 
 ### `Sandbox.get_from_id(serviceId, apiToken?, host?)`
 

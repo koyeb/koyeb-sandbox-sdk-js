@@ -1,5 +1,6 @@
 export * from './errors.js';
 export { KoyebApi, type koyeb } from './api.js';
+export { type MeshScope } from './cidr.js';
 export {
   Sandbox,
   type ConfigFile,

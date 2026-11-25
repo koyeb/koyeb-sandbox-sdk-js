@@ -135,21 +135,41 @@ function normalizeDestination(entry: string): string {
   return `${formatIp(ip.version, ip.bits)}/${ip.version === 4 ? 32 : 128}`;
 }
 
+/** Mesh scopes `mesh_scope` accepts. CUSTOM needs a mesh name and is not supported. */
+export type MeshScope = 'MESH_SCOPE_APP' | 'MESH_SCOPE_WORKSPACE' | 'MESH_SCOPE_ORGANIZATION';
+
+const MESH_SCOPES: readonly string[] = ['MESH_SCOPE_APP', 'MESH_SCOPE_WORKSPACE', 'MESH_SCOPE_ORGANIZATION'];
+
 /**
- * Build a {@link koyeb.NetworkPolicy} from sandbox egress arguments.
+ * Validate a `mesh_scope` value. `undefined` and `MESH_SCOPE_UNSPECIFIED` both mean
+ * "organization default" and return `undefined`.
  *
- * Returns `undefined` when both arguments are unset (leaving the platform default,
- * unrestricted outbound access). `blockNetwork` denies all outbound traffic; an
- * `outboundAllowlist` denies all traffic except the listed IPs/CIDRs (an empty list
- * denies everything). The two arguments are mutually exclusive.
- *
- * @throws {EgressPolicyError} If both arguments are passed, or an allowlist entry is
- *   not a valid IP address or CIDR.
+ * @throws {Error} If the scope is CUSTOM or unknown.
  */
-export function buildNetworkPolicy(
+export function normalizeMeshScope(scope: string | undefined): MeshScope | undefined {
+  if (scope === undefined || scope === 'MESH_SCOPE_UNSPECIFIED') {
+    return undefined;
+  }
+
+  if (scope === 'MESH_SCOPE_CUSTOM') {
+    throw new Error('mesh_scope MESH_SCOPE_CUSTOM needs a mesh name; not supported');
+  }
+
+  if (!MESH_SCOPES.includes(scope)) {
+    throw new Error(`Invalid mesh_scope: ${JSON.stringify(scope)}`);
+  }
+
+  return scope as MeshScope;
+}
+
+/**
+ * Build the egress part of a {@link koyeb.NetworkPolicy}, or `undefined` when both
+ * arguments are unset. See {@link buildNetworkPolicy} for the arguments.
+ */
+export function buildEgressPolicy(
   blockNetwork = false,
   outboundAllowlist?: string[],
-): koyeb.NetworkPolicy | undefined {
+): koyeb.EgressPolicy | undefined {
   if (blockNetwork && outboundAllowlist !== undefined) {
     throw new EgressPolicyError('block_network and outbound_allowlist are mutually exclusive; pass at most one');
   }
@@ -160,5 +180,46 @@ export function buildNetworkPolicy(
 
   const allow_list = outboundAllowlist?.map((entry) => ({ cidr: normalizeDestination(entry) }));
 
-  return { egress: { mode: 'EGRESS_POLICY_MODE_DENY_ALL', allow_list } };
+  return { mode: 'EGRESS_POLICY_MODE_DENY_ALL', allow_list };
+}
+
+/**
+ * Build a {@link koyeb.NetworkPolicy} from sandbox network arguments.
+ *
+ * Returns `undefined` when every argument is unset (leaving the platform default,
+ * unrestricted outbound access). `blockNetwork` denies all outbound traffic; an
+ * `outboundAllowlist` denies all traffic except the listed IPs/CIDRs (an empty list
+ * denies everything). The two are mutually exclusive. `meshScope` selects which
+ * services share the mesh; unset keeps the organization default.
+ *
+ * @throws {EgressPolicyError} If both egress arguments are passed, or an allowlist entry
+ *   is not a valid IP address or CIDR.
+ * @throws {Error} If `meshScope` is CUSTOM or unknown.
+ */
+export function buildNetworkPolicy(
+  blockNetwork = false,
+  outboundAllowlist?: string[],
+  meshScope?: string,
+): koyeb.NetworkPolicy | undefined {
+  const scope = normalizeMeshScope(meshScope);
+  const egress = buildEgressPolicy(blockNetwork, outboundAllowlist);
+
+  if (egress === undefined && scope === undefined) {
+    return undefined;
+  }
+
+  return { ...(egress && { egress }), ...(scope && { mesh: { scope } }) };
+}
+
+/**
+ * Carry the current mesh scope into a new network policy.
+ *
+ * `update_network_policy` only changes egress; replacing the whole network policy
+ * would silently move the sandbox to another mesh.
+ */
+export function keepMesh(
+  policy: koyeb.NetworkPolicy,
+  current: koyeb.NetworkPolicy | undefined,
+): koyeb.NetworkPolicy {
+  return current?.mesh ? { ...policy, mesh: current.mesh } : policy;
 }

@@ -48,10 +48,16 @@ import { classifyDeploymentStatus } from './readiness.js';
 import { wait, waitFor, waitForPhased } from './time.js';
 import {
   EGRESS_WITH_SIDECARS,
+  INACTIVITY_WITH_SIDECARS,
+  SIDECARS_ENV,
   Sidecar,
   SidecarInfo,
+  alignedDeleteAfter,
   checkSidecarDeployment,
+  matchSidecars,
+  parseSidecarsEnv,
   prepareSidecars,
+  sidecarsEnvValue,
 } from './sidecar.js';
 import { nanoId } from './id.js';
 
@@ -164,6 +170,74 @@ async function waitSidecars(
         ? Math.min(DEFAULT_WAIT_START_INTERVAL, pollInterval)
         : Math.min(interval * 2, pollInterval);
   }
+}
+
+/** Every WEB service of an app (paginated). Names are matched exactly by
+ *  the caller: the API's name filter is a substring match (Python:
+ *  _list_app_services). */
+async function listAppServices(api: KoyebApi, appId: string): Promise<koyeb.Service[]> {
+  const services: koyeb.Service[] = [];
+  const limit = 100;
+  let offset = 0;
+
+  for (;;) {
+    const page = await api.listServicesPage({
+      app_id: appId,
+      types: ['WEB' as const],
+      limit: String(limit),
+      offset: String(offset),
+    });
+    services.push(...page.services);
+    offset += limit;
+
+    if (offset >= page.count || page.services.length === 0) {
+      return services;
+    }
+  }
+}
+
+/** The sidecars a sandbox's KOYEB_SIDECARS env lists, matched by exact name to
+ *  the services of the sandbox's app (Python: _find_sidecars).
+ *
+ *  Throws {@link SidecarError} when the env is damaged, the lookup fails, or a
+ *  listed sidecar is missing: a partial list would make update_lifecycle
+ *  skip sidecars silently. */
+async function findSidecars(
+  api: KoyebApi,
+  service: Pick<koyeb.Service, 'app_id' | 'name'>,
+  deploymentEnv?: readonly koyeb.DeploymentEnv[],
+): Promise<SidecarInfo[]> {
+  const entries = parseSidecarsEnv(deploymentEnv?.find(({ key }) => key === SIDECARS_ENV)?.value);
+
+  if (entries.length === 0) {
+    return [];
+  }
+
+  let services: koyeb.Service[];
+  try {
+    services = await listAppServices(api, service.app_id ?? '');
+  } catch (error) {
+    throw new SidecarError(`Could not look up the sidecars of sandbox '${service.name}': ${errorMessage(error)}`, {
+      cause: error,
+    });
+  }
+
+  const { infos, missing } = matchSidecars(entries, services);
+
+  if (missing.length > 0) {
+    const names = missing.map((name) => `'${name}'`).join(', ');
+    throw new SidecarError(
+      `Sandbox '${service.name}' lists sidecar ${names} but its app has no such service (deleted?)`,
+    );
+  }
+
+  return infos;
+}
+
+/** True when a deployment definition carries KOYEB_SIDECARS (Python:
+ *  _lists_sidecars). */
+function listsSidecars(definition?: koyeb.DeploymentDefinition): boolean {
+  return (definition?.env ?? []).some(({ key, value }) => key === SIDECARS_ENV && value);
 }
 
 export type CreateSandboxOptions = Partial<{
@@ -348,6 +422,9 @@ export class Sandbox {
     if (sidecars) {
       opts.enable_mesh = true;
       opts.mesh_scope = 'MESH_SCOPE_APP';
+      // Names and ports, as JSON: nothing secret. Code inside the sandbox can
+      // read it, and get_from_id uses it to find the sidecars again.
+      opts.env = { ...opts.env, [SIDECARS_ENV]: sidecarsEnvValue(sidecars) };
     }
 
     const { definition, sandbox_secret } = buildDefinition({
@@ -405,6 +482,17 @@ export class Sandbox {
       opts.poll_interval,
     );
     sandbox._sidecars = sidecar_infos;
+
+    if (sidecar_infos.length > 0) {
+      const delay = parseDuration(opts.delete_after_delay);
+
+      // Sidecars were created first and the platform counts the delay from
+      // each service's own creation: extend theirs to the sandbox's (best
+      // effort — a failure only logs).
+      if (delay) {
+        await sandbox.alignSidecarsAfterCreate(delay);
+      }
+    }
 
     // The create reply names the deployment it started: pin it so the
     // readiness wait never re-fetches the service to find it.
@@ -518,12 +606,13 @@ export class Sandbox {
               // The API falls back to definition.name; the Python SDK's
               // CreateService payload sets the service name.
               name: sidecar.name,
-              // Region and delete delays follow the sandbox, so the sidecar
-              // expires with it.
+              // Region and delete_after_delay follow the sandbox, so the
+              // sidecar expires with it.
               definition: sidecar.definition(opts.region),
               life_cycle: {
                 delete_after_create: parseDuration(opts.delete_after_delay),
-                delete_after_sleep: parseDuration(opts.delete_after_inactivity_delay),
+                // Sidecars never sleep, so only delete_after_create applies.
+                delete_after_sleep: 0,
               },
             });
             sidecar_infos.push(new SidecarInfo(sidecar.name, service.id!, sidecar.ports));
@@ -697,6 +786,9 @@ export class Sandbox {
     // The deployment is in hand with its metadata: seed the executor
     // address so the first connected call needs no extra lookup.
     sandbox.seedConnInfoFromDeployment(deployment);
+    // Re-find the sidecars the deployment's KOYEB_SIDECARS lists; raises
+    // rather than returning a partial list.
+    sandbox._sidecars = await findSidecars(api, service, deployment.definition?.env);
 
     return sandbox;
   }
@@ -909,6 +1001,11 @@ export class Sandbox {
    * Python parity: caller-supplied fields merge into the life cycle the service already
    * has — fields the call leaves out keep their current value instead of being cleared.
    *
+   * With sidecars, the sidecars are updated first, so they expire with the sandbox
+   * (without redeploying them), and `delete_after_inactivity_delay` is rejected: sidecars
+   * never sleep, so they would outlive the sandbox. The sidecars are read from the
+   * sandbox's live deployment, so this also works on handles from `list()`.
+   *
    * Like the Python SDK, the update redeploys the service; the replacement deployment is
    * pinned so a later wait_ready() follows it.
    */
@@ -916,8 +1013,28 @@ export class Sandbox {
     delete_after_delay?: Duration;
     delete_after_inactivity_delay?: Duration;
   }): Promise<void> {
+    const inactivity =
+      values?.delete_after_inactivity_delay !== undefined
+        ? parseDuration(values.delete_after_inactivity_delay)
+        : undefined;
+
+    if (this._sidecars.length > 0 && inactivity) {
+      throw new SidecarError(INACTIVITY_WITH_SIDECARS);
+    }
+
     const service = await this.api.getService(this.service_id);
     const deployment = await this.api.getDeployment(service.latest_deployment_id!);
+
+    const sidecars = await this.lifecycleSidecars(deployment);
+
+    if (sidecars.length > 0 && inactivity) {
+      throw new SidecarError(INACTIVITY_WITH_SIDECARS);
+    }
+
+    if (sidecars.length > 0 && values?.delete_after_delay !== undefined) {
+      // Sidecars first, so a failure below changes nothing on the sandbox.
+      await this.updateSidecarsDeleteAfter(sidecars, parseDuration(values.delete_after_delay)!, service.created_at);
+    }
 
     // Start from the current life cycle, then overwrite only the fields the caller supplied.
     const life_cycle = { ...service.life_cycle };
@@ -948,6 +1065,71 @@ export class Sandbox {
     this.resetConnectionState(newDeploymentId);
   }
 
+  /** Best effort: a failure only logs — the sidecars then expire a few
+   *  seconds before the sandbox (Python: _align_sidecars_after_create). */
+  private async alignSidecarsAfterCreate(delay: number): Promise<void> {
+    try {
+      const created = (await this.api.getService(this.service_id)).created_at;
+      await this.updateSidecarsDeleteAfter(this._sidecars, delay, created);
+    } catch (error) {
+      console.warn(`Could not align sidecar expiry with the sandbox: ${errorMessage(error)}`);
+    }
+  }
+
+  /** The sidecars to keep in step: the live deployment's KOYEB_SIDECARS,
+   *  covering `list()` handles and stale ones (Python: _lifecycle_sidecars). */
+  private async lifecycleSidecars(deployment: koyeb.Deployment): Promise<SidecarInfo[]> {
+    if (!listsSidecars(deployment.definition)) {
+      return [...this._sidecars];
+    }
+
+    const service = await this.api.getService(this.service_id);
+    const sidecars = await findSidecars(this.api, service, deployment.definition?.env);
+    this._sidecars = sidecars;
+    return sidecars;
+  }
+
+  /** Set each sidecar's `delete_after_create` so it expires with the sandbox,
+   *  as a life-cycle-only update. Skips sidecars already set: an update that
+   *  changes nothing would redeploy them (Python: _update_sidecars_delete_after).
+   *
+   *  @throws {SidecarError} Listing the sidecars whose life cycle could not be
+   *    updated — nothing was changed on the sandbox. */
+  private async updateSidecarsDeleteAfter(
+    sidecars: SidecarInfo[],
+    delay: number,
+    sandboxCreatedAt?: string,
+  ): Promise<void> {
+    const failed: string[] = [];
+
+    for (const info of sidecars) {
+      try {
+        const current = await this.api.getService(info.service_id);
+        const target = alignedDeleteAfter(delay, sandboxCreatedAt, current.created_at);
+
+        if ((current.life_cycle?.delete_after_create ?? 0) === target) {
+          continue;
+        }
+
+        await this.api.updateService(
+          info.service_id,
+          { life_cycle: { delete_after_create: target } },
+          { update_mask: 'life_cycle.delete_after_create' },
+        );
+      } catch (error) {
+        console.debug(`Sidecar '${info.name}' life cycle update failed: ${errorMessage(error)}`);
+        failed.push(info.name);
+      }
+    }
+
+    if (failed.length > 0) {
+      const names = failed.map((name) => `'${name}'`).join(', ');
+      throw new SidecarError(
+        `Nothing was changed on the sandbox: the life cycle of sidecar ${names} could not be updated. Retry update_lifecycle.`,
+      );
+    }
+  }
+
   /**
    * Update the sandbox's egress network policy.
    *
@@ -956,7 +1138,9 @@ export class Sandbox {
    * wait for the redeployment to finish.
    *
    * With no arguments, the egress policy is reset to the platform default (unrestricted outbound
-   * access). `block_network` and `outbound_allowlist` are mutually exclusive.
+   * access). `block_network` and `outbound_allowlist` are mutually exclusive. With sidecars, both
+   * are rejected — on the live deployment too, so a handle from `list()` can't cut a sandbox off
+   * from its sidecars either.
    *
    * @throws {EgressPolicyError} If both `block_network` and `outbound_allowlist` are passed, or an
    *   allowlist entry is not a valid IP address or CIDR.
@@ -976,6 +1160,11 @@ export class Sandbox {
     try {
       const service = await this.api.getService(this.service_id);
       const deployment = await this.api.getDeployment(service.latest_deployment_id!);
+
+      if ((values?.block_network || values?.outbound_allowlist !== undefined) && listsSidecars(deployment.definition)) {
+        // Covers handles that don't know their sidecars (list()).
+        throw new SidecarError(EGRESS_WITH_SIDECARS);
+      }
 
       const updated = await this.api.updateService(this.service_id, {
         definition: {

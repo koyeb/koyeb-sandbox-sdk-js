@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Sidecars stay in step with their sandbox
+
+Like the Python SDK's sidecar lifecycle: a sandbox created with sidecars gets `KOYEB_SIDECARS`
+on its env — its sidecars' names and ports as JSON (nothing secret) — which code inside the
+sandbox can read and `get_from_id` uses to find the sidecars again, matched by exact name among
+the sandbox's app services (no extra API call for sandboxes without sidecars). The name is
+reserved: passing `KOYEB_SIDECARS` in `env` raises, even without sidecars. A damaged value, a
+failed lookup or a missing sidecar raises `SidecarError` instead of returning a partial list.
+
+Sidecars expire with their sandbox: `delete_after_delay` is counted from each service's own
+creation and sidecars are created first, so their delay is extended by the gap — at create
+(best effort: a failure only logs) and in `update_lifecycle`, which updates the sidecars first,
+as life-cycle-only updates (`update_mask` on `life_cycle.delete_after_create`, no redeploy),
+skipping those already set, then the sandbox. It reads the sidecars from the live deployment,
+so handles from `list()` are covered too; a failed sidecar update changes nothing on the sandbox
+(`SidecarError` lists the sidecars).
+
+`delete_after_inactivity_delay` is rejected with sidecars, at create and in `update_lifecycle`:
+sidecars never sleep, so the sandbox would be deleted and its sidecars left running.
+`update_network_policy` also checks the live deployment, so a `list()` handle can't cut a sandbox
+off from its sidecars either.
+
 ### `sidecars` on `Sandbox.create`
 
 Like the Python SDK's `Sandbox.create(sidecars=...)`: `Sandbox.create({ sidecars })` takes a

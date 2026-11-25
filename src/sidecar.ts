@@ -20,6 +20,7 @@
 import type { koyeb } from './api.js';
 import { buildEgressPolicy, findOverlap, type MeshScope } from './cidr.js';
 import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
+import { type Duration, parseDuration } from './duration.js';
 import { EgressPolicyError, SidecarError } from './errors.js';
 import { classifyDeploymentStatus } from './readiness.js';
 
@@ -32,6 +33,12 @@ const MAX_PORT = 64999; // the API reserves ports above 65000
 const MAX_PORTS = 5;
 const MIN_GRACE = 5;
 const MAX_GRACE = 900; // API bounds for the health check grace_period
+
+// Set on the sandbox's env: its sidecars' names and ports, as JSON. Lets a
+// handle from get_from_id find the sidecars without extra API calls for
+// sandboxes that have none, and lets code in the sandbox discover them.
+// Names and ports only: nothing secret.
+export const SIDECARS_ENV = 'KOYEB_SIDECARS';
 
 /** Options for a {@link Sidecar}. */
 export type SidecarOptions = {
@@ -242,6 +249,8 @@ export type SidecarCreateOptions = {
   outbound_allowlist?: string[];
   enable_mesh?: boolean;
   mesh_scope?: MeshScope | 'MESH_SCOPE_UNSPECIFIED';
+  env?: Record<string, EnvValue>;
+  delete_after_inactivity_delay?: Duration;
 };
 
 /**
@@ -251,6 +260,11 @@ export type SidecarCreateOptions = {
 export const EGRESS_WITH_SIDECARS =
   "block_network and outbound_allowlist can't be used on a sandbox with sidecars: they also " +
   "block the mesh, so the sandbox couldn't reach its sidecars. Set egress on each Sidecar instead";
+
+/** Python: INACTIVITY_WITH_SIDECARS, with this SDK's option name. */
+export const INACTIVITY_WITH_SIDECARS =
+  "delete_after_inactivity_delay can't be used on a sandbox with sidecars: " +
+  'sidecars never sleep, so the sandbox would be deleted and its sidecars left running. Use delete_after_delay';
 
 /**
  * Validate `Sandbox.create`'s sidecar arguments when sidecars are given.
@@ -263,6 +277,12 @@ export function prepareSidecars(
   sidecars: Sidecar[] | undefined,
   opts: SidecarCreateOptions,
 ): Sidecar[] | undefined {
+  if (opts.env && SIDECARS_ENV in opts.env) {
+    // Reserved even without sidecars: get_from_id trusts it to find a
+    // sandbox's sidecars, and update_lifecycle then writes to them.
+    throw new SidecarError(`env ${SIDECARS_ENV} is reserved for sidecars`);
+  }
+
   if (!sidecars || sidecars.length === 0) {
     return undefined;
   }
@@ -293,7 +313,121 @@ export function prepareSidecars(
     throw new SidecarError("sidecars use mesh_scope MESH_SCOPE_APP; don't set another");
   }
 
+  if (parseDuration(opts.delete_after_inactivity_delay)) {
+    throw new SidecarError(INACTIVITY_WITH_SIDECARS);
+  }
+
   return validateSidecars(sidecars, opts.name ?? '');
+}
+
+/** One `{ name, ports }` entry of a {@link SIDECARS_ENV} value. */
+export type SidecarEnvEntry = { name: string; ports: number[] };
+
+/** The SIDECARS_ENV value for a sandbox: its sidecars' names and ports, as
+ *  compact JSON (Python: sidecars_env_value). */
+export function sidecarsEnvValue(sidecars: Sidecar[]): string {
+  return JSON.stringify(sidecars.map((sidecar) => ({ name: sidecar.name, ports: [...sidecar.ports] })));
+}
+
+/** Names and ports from a SIDECARS_ENV value; `[]` when unset.
+ *
+ * Strict: anything that isn't a list of valid sidecar names with 1-5 valid
+ * ports throws {@link SidecarError}, so a damaged value is never half trusted
+ * (Python: parse_sidecars_env). */
+export function parseSidecarsEnv(value: string | undefined | null): SidecarEnvEntry[] {
+  if (!value) {
+    return [];
+  }
+
+  const invalid = () => new SidecarError(`Invalid ${SIDECARS_ENV} value`);
+
+  let entries: unknown;
+  try {
+    entries = JSON.parse(value);
+  } catch {
+    throw invalid();
+  }
+
+  if (!Array.isArray(entries)) {
+    throw invalid();
+  }
+
+  const result: SidecarEnvEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of entries) {
+    if (typeof entry !== 'object' || entry === null) {
+      throw invalid();
+    }
+
+    const { name, ports } = entry as { name?: unknown; ports?: unknown };
+
+    try {
+      validateName(name);
+      result.push({ name, ports: validatePorts(name, ports) });
+    } catch (error) {
+      if (error instanceof SidecarError) {
+        throw new SidecarError(`Invalid ${SIDECARS_ENV} value: ${error.message}`, { cause: error });
+      }
+      throw error;
+    }
+
+    if (seen.has(name as string)) {
+      throw new SidecarError(`Invalid ${SIDECARS_ENV} value: duplicate '${name}'`);
+    }
+    seen.add(name as string);
+  }
+
+  return result;
+}
+
+/** Pair SIDECARS_ENV entries with the app's services by exact name (the API's
+ *  name filter is a substring match). Returns the matches and the names with no
+ *  service (Python: match_sidecars). */
+export function matchSidecars(
+  entries: SidecarEnvEntry[],
+  services: readonly koyeb.Service[],
+): { infos: SidecarInfo[]; missing: string[] } {
+  const byName = new Map(services.map((service) => [service.name ?? '', service]));
+  const infos: SidecarInfo[] = [];
+  const missing: string[] = [];
+
+  for (const entry of entries) {
+    const service = byName.get(entry.name);
+
+    if (!service) {
+      missing.push(entry.name);
+    } else {
+      infos.push(new SidecarInfo(entry.name, service.id ?? '', entry.ports));
+    }
+  }
+
+  return { infos, missing };
+}
+
+/** `delete_after_create` for a sidecar so it expires with its sandbox.
+ *
+ * The platform counts the delay from each service's own creation, and sidecars
+ * are created before the sandbox: add the gap. 0 (no expiry) stays 0; unknown
+ * times fall back to `delay` (Python: aligned_delete_after). */
+export function alignedDeleteAfter(
+  delay: number | undefined,
+  sandboxCreatedAt: string | undefined,
+  sidecarCreatedAt: string | undefined,
+): number | undefined {
+  if (!delay || sandboxCreatedAt === undefined || sidecarCreatedAt === undefined) {
+    return delay;
+  }
+
+  const sandboxSeconds = Date.parse(sandboxCreatedAt);
+  const sidecarSeconds = Date.parse(sidecarCreatedAt);
+
+  // Unparsable timestamps count as unknown.
+  if (Number.isNaN(sandboxSeconds) || Number.isNaN(sidecarSeconds)) {
+    return delay;
+  }
+
+  return delay + Math.max(0, Math.ceil((sandboxSeconds - sidecarSeconds) / 1_000));
 }
 
 /** True when the sidecar's deployment is ready, `false` while it is starting; throws

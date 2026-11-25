@@ -240,6 +240,44 @@ await pool.delete();
 | `update_network_policy(values?)`                         | Update the egress policy (block, allowlist, or reset). Triggers a redeployment.                                                                                                                                                                                                                                                   |
 | `delete()`                                               | Tears down the underlying service.                                                                                                                                                                                                                                                                                                |
 
+## Sidecars
+
+A `Sidecar` is a trusted helper service that runs next to a sandbox, with its own image,
+env, secrets and egress policy. The sandbox reaches it by name over a private mesh
+(`http://<name>:<port>`); secrets given to a sidecar never enter the sandbox, so a sidecar
+can hold API keys or run a credential-injecting proxy the sandbox must use but never see.
+See `examples/32_sidecar_proxy.ts` for a mitmproxy sidecar that adds an Authorization
+header for one destination only, from a token that lives in the sidecar's env.
+
+```js
+const sandbox = await Sandbox.create({
+  image: 'koyeb/sandbox',
+  name: 'with-proxy',
+  sidecars: [
+    new Sidecar({
+      name: 'proxy',
+      image: 'mitmproxy/mitmproxy:latest',
+      ports: [8080],
+      env: { API_KEY: { name: 'my-api-key' } },
+    }),
+  ],
+});
+sandbox.sidecar('proxy').url(); // http://proxy:8080
+```
+
+Rules and limits:
+
+- `block_network` and `outbound_allowlist` can't be used on a sandbox with sidecars: they
+  also block the mesh, so the sandbox couldn't reach them. Set egress on each `Sidecar` instead.
+- `app_id` and `snapshot` can't be combined with sidecars: the sandbox needs its own app so
+  the mesh stays private to it and its sidecars, and `snapshot` isn't supported yet.
+- `delete_after_inactivity_delay` is rejected with sidecars: sidecars never sleep, so the
+  sandbox would be deleted and its sidecars left running. Use `delete_after_delay`.
+- `KOYEB_SIDECARS` is reserved on the sandbox's env: it holds its sidecars' names and ports
+  (nothing secret) and `get_from_id` trusts it to find the sidecars again.
+- The `Sidecar` fields and the `Sandbox` sidecar API are stable; how sidecars are hosted is
+  not — today they are services in the sandbox's app, which `SidecarInfo.service_id` reflects.
+
 ## Command Execution
 
 | Method                       | Description                                                                                            |

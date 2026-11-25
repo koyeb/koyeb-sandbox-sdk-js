@@ -12,6 +12,7 @@ export {
   type SandboxProcess,
   type SandboxProcessStatus,
 } from './sandbox.js';
+export { Sidecar, type SidecarOptions } from './sidecar.js';
 export {
   claim,
   get_claim,

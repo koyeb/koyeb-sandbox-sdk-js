@@ -135,6 +135,33 @@ function normalizeDestination(entry: string): string {
   return `${formatIp(ip.version, ip.bits)}/${ip.version === 4 ? 32 : 128}`;
 }
 
+/**
+ * The first pair of overlapping CIDRs in a list, or `undefined` when they are disjoint.
+ * Entries must already be normalized (see {@link buildEgressPolicy}).
+ */
+export function findOverlap(cidrs: string[]): [string, string] | undefined {
+  const nets = cidrs.map((cidr) => {
+    const [address, prefix] = cidr.split('/');
+    const ip = parseIp(address)!;
+    const width = ip.version === 4 ? 32 : 128;
+    const hostBits = BigInt(width - Number(prefix));
+    return { cidr, version: ip.version, start: ip.bits, end: ip.bits | ((1n << hostBits) - 1n) };
+  });
+
+  for (let i = 0; i < nets.length; i++) {
+    for (let j = i + 1; j < nets.length; j++) {
+      const a = nets[i];
+      const b = nets[j];
+
+      if (a.version === b.version && a.start <= b.end && b.start <= a.end) {
+        return [a.cidr, b.cidr];
+      }
+    }
+  }
+
+  return undefined;
+}
+
 /** Mesh scopes `mesh_scope` accepts. CUSTOM needs a mesh name and is not supported. */
 export type MeshScope = 'MESH_SCOPE_APP' | 'MESH_SCOPE_WORKSPACE' | 'MESH_SCOPE_ORGANIZATION';
 

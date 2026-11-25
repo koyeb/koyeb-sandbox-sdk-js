@@ -77,6 +77,13 @@ export class EgressPolicyError extends SandboxError {
   }
 }
 
+/** Sidecar arguments are invalid, or a sidecar failed to start (Python parity). */
+export class SidecarError extends SandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+  }
+}
+
 export class PoolClaimError extends SandboxError {
   constructor(message: string) {
     super(message);

@@ -13,11 +13,14 @@ import {
 import {
   InvalidPortError,
   NoSandboxSecretError,
+  SandboxApiError,
   SandboxDeploymentError,
   SandboxError,
   SandboxRequestError,
   SandboxServiceError,
   SandboxTimeoutError,
+  SidecarError,
+  SidecarTimeoutError,
 } from './errors.js';
 import { SandboxFilesystem } from './sandbox-filesystem.js';
 import { DeclarativeSnapshot, type TemplateOptions } from './declarative-snapshot.js';
@@ -42,7 +45,14 @@ import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js
 import { type Duration, parseDuration } from './duration.js';
 import { assert, getEnv, isDefined, omitUndefined } from './prelude.js';
 import { classifyDeploymentStatus } from './readiness.js';
-import { waitFor, waitForPhased } from './time.js';
+import { wait, waitFor, waitForPhased } from './time.js';
+import {
+  EGRESS_WITH_SIDECARS,
+  Sidecar,
+  SidecarInfo,
+  checkSidecarDeployment,
+  prepareSidecars,
+} from './sidecar.js';
 import { nanoId } from './id.js';
 
 // Value types live with the definition module; re-exported for the public surface.
@@ -57,6 +67,104 @@ export function sandboxAppName(name: string | undefined) {
 }
 
 const randomAppSuffix = nanoId('0123456789abcdefghijklmnopqrstuvwxyz');
+
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** What happened to the app after a failed create with sidecars: `undefined`
+ *  means it was kept on purpose (Python: _app_outcome). */
+function appOutcome(deleted: boolean | undefined, appId: string): string {
+  if (deleted === undefined) {
+    return `The sandbox was not created; app ${appId} was kept for inspection. Delete it when done.`;
+  }
+
+  if (deleted) {
+    return 'The sandbox was not created and its app was deleted.';
+  }
+
+  return `The sandbox was not created and app ${appId} could not be deleted: delete it, its sidecars keep running until then.`;
+}
+
+/** Append how a failed create's app ended up to the error's message (Python: _with_outcome). */
+function withOutcome(error: unknown, outcome: string): void {
+  if (error instanceof Error) {
+    error.message = error.message ? `${error.message} ${outcome}` : outcome;
+  }
+}
+
+/** True when the sidecar is healthy, false while starting or after a transient
+ *  API error (retried until the deadline); SidecarError when it never will be
+ *  (Python: _sidecar_ready). */
+async function sidecarReady(api: KoyebApi, info: SidecarInfo): Promise<boolean> {
+  let status: koyeb.DeploymentStatus | undefined;
+
+  try {
+    const deploymentId = (await api.getService(info.service_id)).latest_deployment_id;
+
+    if (!deploymentId) {
+      return false;
+    }
+
+    status = (await api.getDeployment(deploymentId)).status;
+  } catch {
+    // A control-plane blip means "not yet".
+    return false;
+  }
+
+  return checkSidecarDeployment(info, status);
+}
+
+/** SidecarTimeoutError naming the sidecars that never became healthy (Python: _sidecar_timeout_error). */
+function sidecarTimeoutError(pending: SidecarInfo[], timeout: number): SidecarTimeoutError {
+  const names = pending.map(({ name }) => `'${name}'`).join(', ');
+  return new SidecarTimeoutError(
+    pending.map(({ name }) => name).join(', '),
+    timeout,
+    `Sidecar ${names} did not become healthy within ${Math.round(timeout)} seconds (its first port must accept TCP connections; raise timeout or the sidecar's startup_grace_period for slow images)`,
+  );
+}
+
+/** Wait until every sidecar deployment is healthy; SidecarError when one failed,
+ *  SidecarTimeoutError at the deadline (Python: _wait_sidecars). */
+async function waitSidecars(
+  api: KoyebApi,
+  infos: SidecarInfo[],
+  timeout: number,
+  pollInterval: number,
+): Promise<void> {
+  const start = Date.now();
+  let pending = [...infos];
+  let interval = Math.min(DEFAULT_WAIT_START_INTERVAL, pollInterval);
+
+  for (;;) {
+    // Only the ones still pending, like the sandbox readiness wait.
+    const stillPending: SidecarInfo[] = [];
+
+    for (const info of pending) {
+      if (!(await sidecarReady(api, info))) {
+        stillPending.push(info);
+      }
+    }
+
+    pending = stillPending;
+
+    if (pending.length === 0) {
+      return;
+    }
+
+    if (Date.now() - start >= timeout * 1_000) {
+      throw sidecarTimeoutError(pending, timeout);
+    }
+
+    await wait(interval * 1_000);
+
+    // Fast at first, then doubling up to pollInterval, like wait_ready.
+    const elapsed = (Date.now() - start) / 1_000;
+    interval =
+      elapsed < FAST_POLL_WINDOW
+        ? Math.min(DEFAULT_WAIT_START_INTERVAL, pollInterval)
+        : Math.min(interval * 2, pollInterval);
+  }
+}
 
 export type CreateSandboxOptions = Partial<{
   image: string;
@@ -112,6 +220,15 @@ export type CreateSandboxOptions = Partial<{
   poll_interval: number;
   /** Best-effort delete when readiness fails (default true; Python-SDK parity). */
   cleanup_on_failure: boolean;
+  /**
+   * Trusted helper services to run next to the sandbox, reached from it at
+   * `http://<name>:<port>` over a private app-scoped mesh. They are created
+   * first and, when `wait_ready` is on, the sandbox is created once they are
+   * healthy. They share the sandbox's app (deleted with it) and its region and
+   * delete delays. Can't be combined with `app_id`, `snapshot`, `block_network`,
+   * `outbound_allowlist` or `enable_mesh: false` (Python-SDK parity).
+   */
+  sidecars?: Sidecar[];
 }>;
 
 // Command execution lives in the runner module; re-exported for the public surface.
@@ -158,6 +275,7 @@ export class Sandbox {
   // Pinned deployment (set on reconnection and network-policy updates) so
   // readiness polls the replacement, not the still-active old deployment.
   private _deployment_id?: string;
+  private _sidecars: SidecarInfo[] = [];
 
   constructor(
     public readonly app_id: string,
@@ -188,6 +306,26 @@ export class Sandbox {
     return this.service_id;
   }
 
+  /** Sidecars created with this sandbox (a copy; empty without sidecars). */
+  get sidecars(): SidecarInfo[] {
+    return [...this._sidecars];
+  }
+
+  /**
+   * The sidecar called `name`.
+   *
+   * @throws {SidecarError} If this sandbox has no sidecar with that name
+   */
+  sidecar(name: string): SidecarInfo {
+    const info = this._sidecars.find((sidecar) => sidecar.name === name);
+
+    if (!info) {
+      throw new SidecarError(`Sandbox '${this.name}' has no sidecar '${name}'`);
+    }
+
+    return info;
+  }
+
   private static defaultCreateSandboxOptions = {
     image: 'koyeb/sandbox',
     name: 'quick-sandbox',
@@ -202,6 +340,15 @@ export class Sandbox {
   static async create(options: CreateSandboxOptions = {}): Promise<Sandbox> {
     const opts = { ...this.defaultCreateSandboxOptions, ...omitUndefined(options) };
     const { token } = resolveClient(opts);
+
+    // Sidecar conflicts fail before any API call; with sidecars, the mesh is
+    // forced on with app scope, private to the sandbox and its sidecars.
+    const sidecars = prepareSidecars(opts.sidecars, opts);
+
+    if (sidecars) {
+      opts.enable_mesh = true;
+      opts.mesh_scope = 'MESH_SCOPE_APP';
+    }
 
     const { definition, sandbox_secret } = buildDefinition({
       name: opts.name,
@@ -237,7 +384,16 @@ export class Sandbox {
       // A FULL snapshot carries its own definition; the scope would be silently dropped.
       throw new Error("mesh_scope can't be combined with a full snapshot");
     }
-    const service = await this.createService(token, opts, definition, resolvedSnapshot);
+    // One deadline covers the whole create: the sidecar wait and the sandbox
+    // readiness wait share it, so `timeout` bounds the total.
+    const deadline = Date.now() + opts.timeout * 1_000;
+    const { service, sidecars: sidecar_infos } = await this.createService(
+      token,
+      opts,
+      definition,
+      resolvedSnapshot,
+      sidecars,
+    );
     const sandbox = new Sandbox(
       service.app_id!,
       service.id!,
@@ -248,6 +404,7 @@ export class Sandbox {
       !opts.app_id,
       opts.poll_interval,
     );
+    sandbox._sidecars = sidecar_infos;
 
     // The create reply names the deployment it started: pin it so the
     // readiness wait never re-fetches the service to find it.
@@ -270,7 +427,12 @@ export class Sandbox {
 
       let ready: boolean;
       try {
-        ready = await sandbox.wait_ready(opts.timeout, opts.poll_interval);
+        // Sidecars created and waited for first: whatever time they took
+        // comes off this wait's budget, not on top of it.
+        ready = await sandbox.wait_ready(
+          sidecars ? Math.max(1, (deadline - Date.now()) / 1_000) : opts.timeout,
+          opts.poll_interval,
+        );
       } catch (error) {
         const deleted = await cleanup();
 
@@ -300,15 +462,23 @@ export class Sandbox {
     return sandbox;
   }
 
+  /**
+   * Create the sandbox service (and its sidecars) in the sandbox's app.
+   *
+   * With sidecars, they are created first in the same app and, when
+   * `opts.wait_ready` is on, the sandbox is created once they are healthy.
+   */
   private static async createService(
     token: string,
     opts: CreateSandboxOptions,
     definition: koyeb.DeploymentDefinition,
     snapshot?: { id: string; type: SnapshotType },
-  ) {
+    sidecars: Sidecar[] = [],
+  ): Promise<{ service: koyeb.Service; sidecars: SidecarInfo[] }> {
     const api = new KoyebApi(token, undefined, opts.host);
 
     let app: { id?: string };
+    let created_app = false;
 
     if (opts.app_id) {
       app = { id: opts.app_id };
@@ -317,10 +487,73 @@ export class Sandbox {
         name: sandboxAppName(opts.name),
         life_cycle: { delete_when_empty: true },
       });
+      created_app = true;
+    }
+
+    // Only clean up apps we created; a caller-supplied app outlives us. The
+    // cleanup must never mask the original failure. Returns whether the app
+    // is gone.
+    const delete_created_app = async (): Promise<boolean> => {
+      if (!created_app) {
+        return true;
+      }
+
+      try {
+        await api.deleteApp(app.id!);
+        return true;
+      } catch {
+        // best-effort teardown; the create error matters more
+        return false;
+      }
+    };
+
+    const sidecar_infos: SidecarInfo[] = [];
+
+    if (sidecars.length > 0) {
+      try {
+        for (const sidecar of sidecars) {
+          try {
+            const service = await api.createService({
+              app_id: app.id,
+              // The API falls back to definition.name; the Python SDK's
+              // CreateService payload sets the service name.
+              name: sidecar.name,
+              // Region and delete delays follow the sandbox, so the sidecar
+              // expires with it.
+              definition: sidecar.definition(opts.region),
+              life_cycle: {
+                delete_after_create: parseDuration(opts.delete_after_delay),
+                delete_after_sleep: parseDuration(opts.delete_after_inactivity_delay),
+              },
+            });
+            sidecar_infos.push(new SidecarInfo(sidecar.name, service.id!, sidecar.ports));
+          } catch (error) {
+            throw new SidecarError(`Failed to create sidecar '${sidecar.name}': ${errorMessage(error)}`, {
+              cause: error,
+            });
+          }
+        }
+
+        if (opts.wait_ready) {
+          await waitSidecars(
+            api,
+            sidecar_infos,
+            opts.timeout ?? DEFAULT_WAIT_TIMEOUT,
+            opts.poll_interval ?? DEFAULT_POLL_INTERVAL,
+          );
+        }
+      } catch (error) {
+        // A sidecar that ran and failed may be worth inspecting; anything
+        // else cleans up.
+        const keep = error instanceof SidecarError && !opts.cleanup_on_failure;
+        const deleted = keep ? undefined : await delete_created_app();
+        withOutcome(error, appOutcome(deleted, app.id!));
+        throw error;
+      }
     }
 
     try {
-      return await api.createService({
+      const service = await api.createService({
         app_id: app.id,
         // A FULL snapshot carries its own definition; the API infers it.
         ...(snapshot ? { instance_snapshot_id: snapshot.id } : {}),
@@ -330,15 +563,20 @@ export class Sandbox {
           delete_after_sleep: parseDuration(opts.delete_after_inactivity_delay),
         },
       });
+      return { service, sidecars: sidecar_infos };
     } catch (error) {
-      // Only clean up apps we created; a caller-supplied app outlives us.
-      // The cleanup must never mask the original create failure.
-      if (!opts.app_id) {
-        await api.deleteApp(app.id!).catch(() => {
-          // best-effort teardown; the create error matters more
-        });
+      const deleted = await delete_created_app();
+
+      if (sidecars.length === 0) {
+        throw error;
       }
-      throw error;
+
+      const failure =
+        error instanceof SandboxApiError
+          ? new SandboxError(`Failed to create sandbox '${opts.name}': ${error.message}`, { cause: error })
+          : error;
+      withOutcome(failure, appOutcome(deleted, app.id!));
+      throw failure;
     }
   }
 
@@ -724,6 +962,12 @@ export class Sandbox {
    *   allowlist entry is not a valid IP address or CIDR.
    */
   async update_network_policy(values?: { block_network?: boolean; outbound_allowlist?: string[] }): Promise<void> {
+    // Egress also blocks the mesh: a sandbox with sidecars would be cut off
+    // from them. Set egress on each Sidecar instead.
+    if (this._sidecars.length > 0 && (values?.block_network || values?.outbound_allowlist !== undefined)) {
+      throw new SidecarError(EGRESS_WITH_SIDECARS);
+    }
+
     // Validate before any API call so invalid input fails fast.
     const network_policy = buildNetworkPolicy(values?.block_network, values?.outbound_allowlist) ?? {
       egress: { mode: 'EGRESS_POLICY_MODE_DEFAULT' },

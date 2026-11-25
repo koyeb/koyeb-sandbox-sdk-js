@@ -46,6 +46,18 @@ export class SandboxTimeoutError extends SandboxError {
   }
 }
 
+/**
+ * A sidecar didn't become healthy in time. Also a `SandboxTimeoutError`, so
+ * existing timeout handling catches it.
+ *
+ * Python's `SidecarTimeoutError` inherits from both `SidecarError` and
+ * `SandboxTimeoutError`; JS has single inheritance, so this extends
+ * `SandboxTimeoutError` and `SidecarError` recognizes it through its
+ * `Symbol.hasInstance` (see the note next to `SidecarError`), mirroring the
+ * Python multiple-inheritance shape.
+ */
+export class SidecarTimeoutError extends SandboxTimeoutError {}
+
 export class NoSandboxSecretError extends SandboxError {
   constructor(message = 'The SANDBOX_SECRET environment variable is not set') {
     super(message);
@@ -83,6 +95,15 @@ export class SidecarError extends SandboxError {
     super(message, options);
   }
 }
+
+// Python's SidecarTimeoutError is both a SidecarError and a SandboxTimeoutError; JS
+// classes inherit from one base, so this hook keeps `instanceof SidecarError` true
+// for timeout failures while SidecarTimeoutError extends SandboxTimeoutError.
+Object.defineProperty(SidecarError, Symbol.hasInstance, {
+  // `any`: JS `instanceof` accepts any left operand; the TS lib stub models it as Object.
+  value: (instance: any) =>
+    SidecarError.prototype.isPrototypeOf(instance) || instance instanceof SidecarTimeoutError,
+});
 
 export class PoolClaimError extends SandboxError {
   constructor(message: string) {

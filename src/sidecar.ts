@@ -18,9 +18,10 @@
  */
 
 import type { koyeb } from './api.js';
-import { buildEgressPolicy, findOverlap } from './cidr.js';
+import { buildEgressPolicy, findOverlap, type MeshScope } from './cidr.js';
 import { buildDefinition, type ConfigFile, type EnvValue } from './definition.js';
 import { EgressPolicyError, SidecarError } from './errors.js';
+import { classifyDeploymentStatus } from './readiness.js';
 
 // A DNS label the API accepts as a service name: the sandbox reaches the sidecar
 // at http://<name>:<port>. The API's slug rule allows no empty segment, so no "--"
@@ -230,6 +231,116 @@ export function validateSidecars(sidecars: Iterable<Sidecar>, sandboxName: strin
   }
 
   return list;
+}
+
+/** Sandbox.create options that conflict with sidecars (Python: prepare_sidecars kwargs). */
+export type SidecarCreateOptions = {
+  name?: string;
+  app_id?: string;
+  snapshot?: unknown;
+  block_network?: boolean;
+  outbound_allowlist?: string[];
+  enable_mesh?: boolean;
+  mesh_scope?: MeshScope | 'MESH_SCOPE_UNSPECIFIED';
+};
+
+/**
+ * Sandbox-level egress can't be used with sidecars (Python parity): blocking
+ * outbound traffic also blocks the mesh, so the sandbox couldn't reach them.
+ */
+export const EGRESS_WITH_SIDECARS =
+  "block_network and outbound_allowlist can't be used on a sandbox with sidecars: they also " +
+  "block the mesh, so the sandbox couldn't reach its sidecars. Set egress on each Sidecar instead";
+
+/**
+ * Validate `Sandbox.create`'s sidecar arguments when sidecars are given.
+ *
+ * Returns `undefined` when there are no sidecars (create behaves exactly as
+ * before), otherwise the validated list. Every argument that can't combine
+ * with sidecars fails here, before any API call.
+ */
+export function prepareSidecars(
+  sidecars: Sidecar[] | undefined,
+  opts: SidecarCreateOptions,
+): Sidecar[] | undefined {
+  if (!sidecars || sidecars.length === 0) {
+    return undefined;
+  }
+
+  if (opts.app_id !== undefined) {
+    throw new SidecarError(
+      "sidecars can't be combined with app_id: the sandbox needs its own app so the mesh stays private to it and its sidecars",
+    );
+  }
+
+  if (opts.snapshot !== undefined) {
+    throw new SidecarError("sidecars can't be combined with snapshot yet");
+  }
+
+  if (opts.block_network || opts.outbound_allowlist !== undefined) {
+    throw new SidecarError(EGRESS_WITH_SIDECARS);
+  }
+
+  if (opts.enable_mesh === false) {
+    throw new SidecarError("sidecars need the mesh; don't pass enable_mesh: false");
+  }
+
+  if (
+    opts.mesh_scope !== undefined &&
+    opts.mesh_scope !== 'MESH_SCOPE_UNSPECIFIED' &&
+    opts.mesh_scope !== 'MESH_SCOPE_APP'
+  ) {
+    throw new SidecarError("sidecars use mesh_scope MESH_SCOPE_APP; don't set another");
+  }
+
+  return validateSidecars(sidecars, opts.name ?? '');
+}
+
+/** True when the sidecar's deployment is ready, `false` while it is starting; throws
+ *  {@link SidecarError} when the sidecar won't become ready on its own (Python parity). */
+export function checkSidecarDeployment(info: SidecarInfo, status?: koyeb.DeploymentStatus): boolean {
+  const classification = classifyDeploymentStatus(status);
+
+  if (classification === 'terminal_failure') {
+    throw new SidecarError(`Sidecar '${info.name}' failed to start (deployment status: ${status ?? 'UNKNOWN'})`);
+  }
+
+  return classification === 'ready';
+}
+
+/**
+ * A sidecar created with a sandbox.
+ *
+ * The sandbox reaches it at `http://<name>:<port>`.
+ */
+export class SidecarInfo {
+  readonly name: string;
+  /** The service running the sidecar. Sidecars are services in the sandbox's app today,
+   *  which this reflects; hosting may change (Python-SDK parity). */
+  readonly service_id: string;
+  readonly ports: readonly number[];
+
+  constructor(name: string, service_id: string, ports: Iterable<number>) {
+    this.name = name;
+    this.service_id = service_id;
+    this.ports = Object.freeze([...ports]);
+  }
+
+  /**
+   * URL the sandbox uses to reach this sidecar, on `port` (one of its declared
+   * ports) or the first declared port.
+   *
+   * @throws {SidecarError} If `port` isn't one of the sidecar's ports
+   */
+  url(port?: number, scheme = 'http'): string {
+    if (port === undefined) {
+      port = this.ports[0];
+    } else if (!this.ports.includes(port)) {
+      throw new SidecarError(`Sidecar '${this.name}' doesn't declare port ${port} (ports: [${[...this.ports].join(', ')}])`);
+    }
+
+    return `${scheme}://${this.name}:${port}`;
+  }
 }
 
 function describe(value: unknown): string {

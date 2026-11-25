@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### `sidecars` on `Sandbox.create`
+
+Like the Python SDK's `Sandbox.create(sidecars=...)`: `Sandbox.create({ sidecars })` takes a
+list of `Sidecar` objects, created first in the sandbox's app (with its region and its
+`delete_after_delay`/`delete_after_inactivity_delay`, and the service name set). When `wait_ready`
+is on (the default), the sandbox is created only once every sidecar is healthy, i.e. its first
+port accepts TCP connections; the sidecar wait and the sandbox readiness wait share one `timeout`
+deadline. The sandbox's mesh is forced on with app scope, so the mesh is private to the sandbox and
+its sidecars, which it reaches at `http://<name>:<port>`.
+
+A sidecar that fails or never becomes healthy raises `SidecarError` (`SidecarTimeoutError` on a
+timeout, which is also a `SandboxTimeoutError`), says which sidecar, what happened to the app —
+deleted, kept for inspection with `cleanup_on_failure: false`, or failed to delete — and the app
+the call created is (best-effort) cleaned up. Conflicting arguments (`app_id`, `snapshot`,
+`block_network`, `outbound_allowlist`, `enable_mesh: false`, another `mesh_scope`, duplicate names)
+fail before any API call. `update_network_policy` rejects `block_network` and
+`outbound_allowlist` on a sandbox with sidecars: they also block the mesh.
+
+`sandbox.sidecars` and `sandbox.sidecar(name)` return `SidecarInfo` (name, `service_id`, frozen
+ports, `url(port?, scheme)`). Backward compatible: `sidecars` defaults to none and create sends the
+same requests as before.
+
 ### `Sidecar`: a helper service that runs next to the sandbox
 
 Like the Python SDK's `Sidecar`: a trusted helper service with its own image, env,
@@ -11,9 +33,8 @@ private mesh (`http://<name>:<port>`). Secrets given to a sidecar never enter th
 a set: unique names, none equal to the sandbox's. A sidecar is built as a WEB service with no
 routes (not public), tcp ports, a TCP health check on its first port (`startup_grace_period`,
 5-900 s), the mesh enabled with app scope, its own optional egress policy (`block_network`,
-`outbound_allowlist`) and no scale-to-zero. VPN-style sidecars can run `privileged`. This
-release only describes sidecars and builds their service: `Sandbox.create` does not use them
-yet.
+`outbound_allowlist`) and no scale-to-zero. VPN-style sidecars can run `privileged`.
+`Sandbox.create({ sidecars })` runs them next to a sandbox (see the `sidecars` entry above).
 
 ### `mesh_scope` on `Sandbox.create`
 

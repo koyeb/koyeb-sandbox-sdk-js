@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Sidecar credential-injection example and docs
+
+`examples/32_sidecar_proxy.ts` shows the point of sidecars: a mitmproxy sidecar adds an
+Authorization header for one destination, from a token that lives only in the sidecar's
+env. The addon matches the real destination (HTTPS, host, port 443, matching Host header),
+never the client-controlled Host header, and strips Authorization everywhere else. The
+sandbox routes HTTPS through `http://proxy:8080` and trusts the proxy's public CA, fetched
+through the proxy; the CA key stays in the sidecar. The example checks that
+httpbin.org/bearer accepts the injected token (which isn't echoed back), that a spoofed
+Host header gets no token, and that the token isn't in the sandbox's environment. The
+README gains a `Sidecars` section.
+
 ### Sidecars stay in step with their sandbox
 
 Like the Python SDK's sidecar lifecycle: a sandbox created with sidecars gets `KOYEB_SIDECARS`
